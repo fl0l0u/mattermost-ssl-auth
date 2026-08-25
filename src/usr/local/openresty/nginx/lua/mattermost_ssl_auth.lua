@@ -349,12 +349,13 @@ end
 
 -- No-op when we do not hold the lock (e.g. the wait ended in the fast
 -- path). Best effort: a failed release is harmless, the 30 s TTL reclaims a
--- stale lock.
-function MattermostSslAuth:release_lock(email)
+-- stale lock. The lock is always keyed by self.email — the only email this
+-- instance ever locks — so the parameter is gone.
+function MattermostSslAuth:release_lock()
     if not self.lock_owner then
         return
     end
-    self.redisc:eval(LOCK_RELEASE, 1, lock_key(email), self.lock_owner)
+    self.redisc:eval(LOCK_RELEASE, 1, lock_key(self.email), self.lock_owner)
     self.lock_owner = nil
 end
 
@@ -529,9 +530,9 @@ function MattermostSslAuth:self_heal_password(user)
 
     if user.delete_at and user.delete_at ~= 0 then
         local res, err = self:api_request(
-            "PATCH",
-            "/api/v4/users/" .. ngx.escape_uri(user_id),
-            cjson.encode({ is_active = true }),
+            "PUT",
+            "/api/v4/users/" .. ngx.escape_uri(user_id) .. "/active",
+            cjson.encode({ active = true }),
             json_headers(self.provision_token)
         )
         if not res then
@@ -657,7 +658,7 @@ function MattermostSslAuth:resolve_password()
         if self:get_cookies() then
             -- The session appeared while we waited; release our lock if the
             -- wait ended in a re-acquisition.
-            self:release_lock(self.email)
+            self:release_lock()
             return self:get_password()
         end
         -- Otherwise we re-acquired the lock and no session exists yet: fall
@@ -665,7 +666,7 @@ function MattermostSslAuth:resolve_password()
     end
 
     local password = self:resolve_password_locked()
-    self:release_lock(self.email)
+    self:release_lock()
     return password
 end
 
@@ -762,6 +763,11 @@ function MattermostSslAuth:rewrite_request(cookies_string, token, mmcsrf)
 end
 
 function MattermostSslAuth:fail(status, msg)
+    -- Release the session lock before terminating: ngx.exit kills the
+    -- request, so without this a failure inside the critical section would
+    -- leave the 30 s lock behind and every waiter for the same email would
+    -- burn its 15 s wait window and time out with 504.
+    self:release_lock()
     ngx.log(ngx.ERR, "[lua] ", msg)
     -- ngx.status must be set before ngx.say: the first say starts the
     -- response with whatever status is currently in effect (200 by
