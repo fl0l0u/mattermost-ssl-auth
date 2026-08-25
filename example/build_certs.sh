@@ -20,8 +20,8 @@ openssl req -new -config etc/signing-ca.conf -newkey rsa:4096 -days 3650 -nodes 
 yes | openssl ca -config etc/root-ca.conf -in ca/signing-ca.csr -out ca/signing-ca.crt -extensions signing_ca_ext
 
 # Generate server certificate
-SAN=DNS:gitlab.simple.org openssl req -new -config etc/server.conf -out certs/gitlab.csr -keyout certs/gitlab.key -subj "/DC=org/DC=simple/O=Simple Inc/OU=Server/CN=gitlab.simple.org"
-yes | openssl ca -config etc/signing-ca.conf -in certs/gitlab.csr -out certs/gitlab.crt -extensions server_ext
+SAN=DNS:mattermost.example.test openssl req -new -config etc/server.conf -out certs/mattermost.csr -keyout certs/mattermost.key -subj "/DC=org/DC=simple/O=Simple Inc/OU=Server/CN=mattermost.example.test"
+yes | openssl ca -config etc/signing-ca.conf -in certs/mattermost.csr -out certs/mattermost.crt -extensions server_ext
 
 # Generate admin user
 openssl req -new -nodes -sha512 -newkey rsa:4096 -keyout certs/flo.key -out certs/flo.csr -subj "/emailAddress=flolou@simple.org/CN=Flo Lou/O=Simple Inc/OU=Admins/C=FR/ST=State/L=City/DC=simple/DC=org"
@@ -30,5 +30,5 @@ openssl pkcs12 -inkey certs/flo.key -in certs/flo.crt -export -out certs/flo.pfx
 
 # Generate simple user (with non-ascii characters)
 openssl req -new -nodes -sha512 -newkey rsa:4096 -keyout certs/aze.key -out certs/aze.csr -subj "/emailAddress=azerty@simple.org/CN=Azé Rtÿiôµ/O=Simple Inc/OU=Users/C=FR/ST=State/L=City/DC=simple/DC=org"
-openssl ca -config etc/signing-ca.conf -in certs/aze.csr -out certs/aze.crt
+yes | openssl ca -config etc/signing-ca.conf -in certs/aze.csr -out certs/aze.crt
 openssl pkcs12 -inkey certs/aze.key -in certs/aze.crt -export -out certs/aze.pfx -passout pass:

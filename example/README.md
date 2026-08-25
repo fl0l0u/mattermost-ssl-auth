@@ -1,23 +1,49 @@
 # Example
+
+Demo PKI and one-shot installer for the Mattermost gateway.
+
 ## Pre-requisite
 * `openssl` installed
+* for `demo_install.sh`: a **fresh Ubuntu 24.04 LTS** server, run as root
 
-## Create testing certificates
+## 1. Full demo install (Ubuntu 24.04)
+
+```bash
+sudo bash demo_install.sh
+```
+
+Installs and wires up everything on a clean box:
+* apt: OpenResty (official repo), Mattermost (newest 11.x, official repo), PostgreSQL, Redis
+* Postgres: role `mmuser` + database `mattermost`
+* Mattermost: loopback listen (`127.0.0.1:8065`), `SiteURL=https://mattermost.example.test`, local mode, SQL DSN
+* First user via the API (local mode makes it the system admin), provisioning PAT, default team
+* PKI (via `build_certs.sh`) → `/etc/ssl/private/{mattermost.crt,mattermost.key,client-ca.crt}`
+* lua-resty-http v0.17.1 → `/usr/local/openresty/nginx/lua/resty/`
+* gateway files from `src/` (existing files backed up) + `/etc/mattermost-ssl-auth.env` (root:600)
+* `mattermost-ssl-auth` service started, `openresty -t` + certificate smoke test
+
+The script is idempotent: secrets are persisted under `/etc/mattermost-ssl-auth-demo/` so re-runs stay consistent.
+
+## 2. Certificates only
+
 ```bash
 bash build_certs.sh
 ```
 
-## Installation
-* Use `certs/*.pfx` to install user certificates
-* (optional) Install `ca/root-ca.crt` as root CA
-* (optional) Install `ca/signing-ca.crt` as intermediate root CA
-* Copy server certificates:
-```bash
-cp certs/gitlab.{crt,key} /etc/ssl/private/
-cat ca/*.crt > /etc/ssl/private/ca.crt
-```
-* (optional) configure gitlab alias (`gitlab.simple.org`) in /etc/hosts
-* Follow main project installation steps to configure a Gitlab with SSL authentication
+Builds a minimal two-level PKI (root CA + signing CA):
+* server certificate `certs/mattermost.{crt,key}` for `mattermost.example.test` (SAN)
+* admin user `certs/flo.{crt,key,pfx}` — `flolou@simple.org`, `CN=Flo Lou`, `OU=Admins` (provisioned as `system_admin`)
+* regular user `certs/aze.{crt,key,pfx}` — `azerty@simple.org`, `CN=Azé Rtÿiôµ`, `OU=Users` (non-ASCII CN on purpose)
 
-## Connection
-Open browser and connect to https://gitlab.simple.org or directly using the IP address of your test server
+To deploy the server material manually:
+```bash
+sudo cp certs/mattermost.crt /etc/ssl/private/
+sudo install -m 600 certs/mattermost.key /etc/ssl/private/
+sudo sh -c 'cat ca/signing-ca.crt ca/root-ca.crt > /etc/ssl/private/client-ca.crt'
+```
+
+## 3. Connection
+* (optional) install `ca/root-ca.crt` as a trusted root CA
+* import a user PFX (`certs/flo.pfx` or `certs/aze.pfx`, empty password) into the browser
+* add `mattermost.example.test` to `/etc/hosts` (or point a real DNS entry at the box)
+* open `https://mattermost.example.test` — the gateway provisions the user on first connection and signs them in; no password is ever shown
