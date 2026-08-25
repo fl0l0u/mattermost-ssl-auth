@@ -1,0 +1,23 @@
+# /etc/systemd/system/mattermost-ssl-auth.service
+[Unit]
+Description=Mattermost SSL Auth OpenResty
+After=network-online.target redis-server.target
+Wants=network-online.target
+PartOf=mattermost.service
+
+[Service]
+Type=forking
+ExecStart=/usr/local/openresty/nginx/sbin/nginx -c /usr/local/openresty/nginx/conf/nginx.conf
+ExecReload=/usr/local/openresty/nginx/sbin/nginx -c /usr/local/openresty/nginx/conf/nginx.conf -s reload
+ExecStop=/usr/local/openresty/nginx/sbin/nginx -c /usr/local/openresty/nginx/conf/nginx.conf -s quit
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+# ProtectSystem=strict makes the filesystem read-only; nginx can only
+# write to these paths (pid + logs).
+ReadWritePaths=/var/log/openresty /var/run/openresty
+EnvironmentFile=/etc/mattermost-ssl-auth.env
+
+[Install]
+WantedBy=multi-user.target
