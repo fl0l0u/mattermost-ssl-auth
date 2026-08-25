@@ -34,10 +34,11 @@ if not password then
     return inject_session(fresh, ssl:get_token())
 end
 
--- 2.3. AUTH USER
-local session_cookies, token, err = ssl:http_login(password, nil, nil)
+-- 2.3. AUTH USER (http_login returns cookies + token on success, and
+-- nil + error message on failure — the second value doubles as the error)
+local session_cookies, token = ssl:http_login(password, nil, nil)
 if not session_cookies then
-    return ssl:fail(ngx.HTTP_BAD_REQUEST, err)
+    return ssl:fail(ngx.HTTP_BAD_REQUEST, token)
 end
 
 -- 2.4. CACHE SESSION

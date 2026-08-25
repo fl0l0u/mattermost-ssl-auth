@@ -38,10 +38,11 @@ if not stale_csrf then
     stale_csrf = ""
 end
 
--- 2.3. AUTH USER
-local cookies, token, err = ssl:http_login(password, table.concat(stale, "; "), stale_csrf)
+-- 2.3. AUTH USER (http_login returns cookies + token on success, and
+-- nil + error message on failure — the second value doubles as the error)
+local cookies, token = ssl:http_login(password, table.concat(stale, "; "), stale_csrf)
 if not cookies then
-    return ssl:fail(ngx.HTTP_BAD_REQUEST, err)
+    return ssl:fail(ngx.HTTP_BAD_REQUEST, token)
 end
 
 -- 2.4. CACHE SESSION

@@ -469,9 +469,10 @@ function MattermostSslAuth:apply_provisioning(user_id)
     return true
 end
 
--- Creates the user, applies provisioning, and caches the password only if
--- every step succeeded, so a failed creation never leaves a password
--- pointing at a missing or half-provisioned account.
+-- Creates the user, applies provisioning, caches the password, and
+-- returns it — only if every step succeeded, so a failed creation never
+-- leaves a password pointing at a missing or half-provisioned account.
+-- The caller logs in with the returned password to establish the session.
 function MattermostSslAuth:create_user(password)
     if not self.provision_token then
         return nil, "MATTERMOST_PROVISION_TOKEN is not configured"
@@ -512,16 +513,36 @@ function MattermostSslAuth:create_user(password)
         return nil, prov_err
     end
     self:store_password(password)
-    return user
+    return password
 end
 
 -- Rotates the user's password (the cached one no longer logs in) and
--- re-asserts the provisioned state. The new password is cached only after
--- the rotation and the provisioning both succeeded.
-function MattermostSslAuth:self_heal_password(user_id)
+-- re-asserts the provisioned state. A soft-deleted account is reactivated
+-- first: Mattermost's DELETE deactivates instead of removing, and a
+-- deactivated account can never log in, so rotation alone would not
+-- converge. The new password is cached only after everything succeeded.
+function MattermostSslAuth:self_heal_password(user)
     if not self.provision_token then
         return nil, "MATTERMOST_PROVISION_TOKEN is not configured"
     end
+    local user_id = user.id
+
+    if user.delete_at and user.delete_at ~= 0 then
+        local res, err = self:api_request(
+            "PATCH",
+            "/api/v4/users/" .. ngx.escape_uri(user_id),
+            cjson.encode({ is_active = true }),
+            json_headers(self.provision_token)
+        )
+        if not res then
+            return nil, err
+        end
+        local body = res:read_body()
+        if res.status ~= 200 then
+            return nil, "failed to reactivate user (HTTP " .. res.status .. "): " .. body
+        end
+    end
+
     local new_password = self:random_password()
     local res, err = self:api_request(
         "PUT",
@@ -682,7 +703,7 @@ function MattermostSslAuth:repair_password(missing_user_msg)
         self:fail(ngx.HTTP_BAD_GATEWAY, "user lookup failed: " .. err)
     end
     if user then
-        local password, heal_err = self:self_heal_password(user.id)
+        local password, heal_err = self:self_heal_password(user)
         if not password then
             self:fail(ngx.HTTP_BAD_GATEWAY, "failed to rotate user password: " .. tostring(heal_err))
         end
@@ -742,7 +763,11 @@ end
 
 function MattermostSslAuth:fail(status, msg)
     ngx.log(ngx.ERR, "[lua] ", msg)
-    ngx.say("[lua] ", msg)
+    -- ngx.status must be set before ngx.say: the first say starts the
+    -- response with whatever status is currently in effect (200 by
+    -- default), so a say-then-exit order would serve every failure as 200.
+    ngx.status = status
+    ngx.say("[lua] ", msg or "unknown error")
     ngx.exit(status)
 end
 
