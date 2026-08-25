@@ -230,17 +230,11 @@ function MattermostSslAuth:parse_dn(fqdn)
         return nil, "failed to parse username from " .. email
     end
 
-    -- Cert-driven admin: an RDN whose key equals CERT_ADMIN_OU and whose
-    -- value is "TRUE" (case-insensitive) marks the user as an admin when the
-    -- gateway auto-provisions. An explicit empty CERT_ADMIN_OU disables the
+    -- Cert-driven admin: the OU value equal to CERT_ADMIN_OU (default
+    -- "Admins") marks the user as an admin when the gateway
+    -- auto-provisions. An explicit empty CERT_ADMIN_OU disables the
     -- feature.
-    local admin = false
-    if self.admin_ou ~= "" then
-        local marker = values[self.admin_ou]
-        if marker and marker:upper() == "TRUE" then
-            admin = true
-        end
-    end
+    local admin = (self.admin_ou ~= "" and values["OU"] == self.admin_ou) or false
 
     return {
         email = email,

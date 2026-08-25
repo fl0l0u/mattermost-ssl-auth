@@ -1,94 +1,105 @@
-# Gitlab SSL Auth
-## About The Project
-Client certificate authentication to Gitlab-CE using OpenResty and Lua
+# Mattermost SSL Auth
 
-![Product screenshot][preview]
+## About the project
 
-This project replaces the Gitlab bundled Nginx with OpenResty
+Client-certificate (x509) single sign-on for [Mattermost](https://mattermost.com) behind an OpenResty reverse proxy. A port of [fl0l0u/gitlab-ssl-auth](https://github.com/fl0l0u/gitlab-ssl-auth) (Apache-2.0) from GitLab to Mattermost.
+
+The browser presents a client certificate over TLS; the gateway maps that certificate to a Mattermost user, logs the user in server-side, and proxies the session. Users never see — or type — a password, and no Mattermost session cookie ever reaches the browser.
+
+## How it works
+
+```
+ +---------+  TLS + client cert   +--------------------------+  HTTP, loopback   +-------------+
+ | browser | -------------------> | OpenResty :443           | ----------------> | Mattermost  |
+ |         | <-------------------- | gateway (Lua)            | <----------------- | 127.0.0.1  |
+ +---------+  proxied response;   +----------+---------------+  session replayed  | :8065      |
+            no Mattermost cookies          |                                    +-------------+
+            ever reach the browser         | per-user session:
+                                           | cookies + token + password
+                                           v
+                                        +---------+          create / repair user,
+                                        |  Redis  | <-------> team join, rotate
+                                        +---------+          password (admin API,
+                                           x509auth:            system-admin PAT)
+                                           <email>:{password,
+                                            cookies, token}
+```
+
+1. The browser opens `https://mattermost.example.test` presenting a client certificate signed by the trusted client CA (`ssl_verify_client on` — requests without a valid certificate are refused at the TLS layer).
+2. The gateway parses the certificate DN: email attribute → username, name attribute → display name, `OU=Admins` → system admin.
+3. If no session is stored for that user yet, the gateway resolves a password (provisioning the user via the admin API when `ALLOW_PROVISION=true`), logs in against `/api/v4/users/login`, and stores the resulting session cookies and Bearer token in Redis.
+4. Every forwarded request gets `Cookie`, `X-CSRF-Token` and `Authorization` overwritten from the stored session, so the browser never carries Mattermost session material.
+5. Navigating to `/login` drops and re-logs in the stored session (renewal).
 
 ## Features
 
-* Gitlab will now ask for a x509 certificate to generate and authenticate its users
-* Users are provisioned at first connection (default configuration)
-* Session cookies are never passed to the client, they are overwritten internally to prevent session theft
+* Per-certificate user mapping from the DN (`emailAddress`, `CN`, `OU`)
+* Self-healing login: a stale cached password is rotated (or the user re-provisioned) through the admin API, transparently
+* `OU=Admins` certificates are provisioned as `system_admin`
+* New users are added to the default team automatically
+* Session state in Redis — survives gateway restarts
+* `/login` renewal for browser-driven session refresh
+* WebSocket support (`/api/v4/websocket`)
+* Audit access log: every request records the presenting certificate (verify status, fingerprint, DN); sensitive query params (`token`, `code`, `invite_id`) are redacted
 
-## Getting started
-### Installation
+## Quick start
 
-Project directory tree under `src` reproduces the target deployment on a Ubuntu Server 22.04 system.
+TL;DR — on a fresh Ubuntu 24.04 box:
 
-***TLDR**: Install OpenResty, Disable Gitlab Nginx, Copy stuff inside `src` directory according to its directory tree (i.e. `src/etc/bla` -> `/etc/bla`), Add **lua-resty-http** libs and Run the new systemd gitlab-ssl-auth.service.*
-
-**Detailed installation:**
-* Install [OpenResty][openresty]
-* Replace default OpenResty Nginx config by `usr/local/openresty/nginx/conf/nginx.conf` 
-* Configure SSL certificates for Nginx (default `/etc/ssl/private/`), modify it on nginx.conf if needed
-* [Disable Gitlab bundled Nginx][disable-gitlab-nginx]. In /etc/gitlab/gitlab.rb set:
-```ruby
-nginx['enable'] = false
-```
-Then reconfigure Gitlab to stop its bundled Nginx
 ```bash
-gitlab-ctl reconfigure
-```
-* Copy `opt/gitlab/runner.rb` in the Gitlab directory, or somewhere with read access for system user `git` (privilege needed to connect to `gitlab-workhorse` and `redis` unix sockets)
-* Copy `etc/systemd/system/gitlab-ssl-auth.service` to systemd configuration directory
-* Copy `usr/local/openresty/nginx/lua/` in OpenResty nginx lua directory (this directory is appended in [`nginx.conf`][nginx-conf-lua-dir])
-* Adjust ACLs `chmod 644 /opt/gitlab/runner.rb`, `chmod -R 644 /usr/local/openresty/nginx/lua; chmod 755 /usr/local/openresty/nginx/lua /usr/local/openresty/nginx/lua/resty; chown -R git /usr/local/openresty/nginx/lua`;
-* Install dependencies in OpenResty nginx lua library directory:
-  * [lua-resty-http][lua-resty-http] (project developped with v0.17.1)
-```bash
-cd /usr/local/openresty/nginx/lua/ # cd into the lua modules directory
-sudo mkdir resty
-cd resty
-
-sudo curl https://raw.githubusercontent.com/ledgetech/lua-resty-http/v0.17.1/lib/resty/http.lua -o http.lua
-sudo curl https://raw.githubusercontent.com/ledgetech/lua-resty-http/v0.17.1/lib/resty/http_connect.lua -o http_connect.lua
-sudo curl https://raw.githubusercontent.com/ledgetech/lua-resty-http/v0.17.1/lib/resty/http_headers.lua -o http_headers.lua
-```
-* Start Gitlab-runner service:
-```bash
-systemctl daemon-reload && systemctl enable gitlab-ssl-auth.service && systemctl start gitlab-ssl-auth.service
-```
-* Reload OpenResty config:
-```
-openresty -t && openresty -s reload
+git clone <this-repo> mattermost-ssl-auth && cd mattermost-ssl-auth
+sudo bash example/demo_install.sh
 ```
 
-### Example
+The script installs everything (OpenResty, Mattermost 11.x, PostgreSQL, Redis), provisions the first admin + provisioning PAT + default team, builds the demo PKI, deploys the gateway, and starts the `mattermost-ssl-auth` service. Then add `mattermost.example.test` to `/etc/hosts`, import `example/certs/flo.pfx` into the browser (trusting `example/ca/root-ca.crt`), and open `https://mattermost.example.test`.
 
-The [`example`](example) directory provides succints scripts (one based on [OpenSSL PKI Tutorial][openssl-pki-tuto]) to setup minimal SSL PKI and certificates to test the project.
-* [build_certs.sh][script-cert]: Create a minimal PKI with one server and two users to test SSL certificate authentication.
-* [demo_install.sh][script-install]: Deploys scripts and optionally install required `deb` packages to run a Gitlab-CE with SSL authentication (also calls above PKI generation script).
+Manual installation and PKI details: [`example/README.md`](example/README.md).
 
-### Caveats
+## Configuration
 
-* The Client certificate `Subject` is parsed to populate `username` from `emailAddress` field and `display_name` from `CN` field. Only first `CN` field will be taken as `display_name` (i.e. objects like Active Directory builtin DA DN - *[`CN=Administrator, CN=Users, DC=...`][ms-adds-acnts]* - may not be parsed as expected).
-* The [certificate `emailAddress` field is parsed to generate the `username`][username-parsing], `username@test.com` and `username@ext.test.com` will collide and the first user created will prevent the creation of the second.
-* By default a certificate with a `Subject` including an `OU` named `Admins` will create an [admin user][admin-parsing]. Existing users will not see their privileges change.
-* Deleting a user in Gitlab will not flush it's password in `redis` which is used to perform authentication. Connecting again with this user certificate will not recreate a new user (who was certainly deleted for a reason) unless an admin manually removes his cached password in `redis`
-```bash
-gitlab-redis DEL "x509auth:<username>:password"
-```
-* The `gitlab-ssl-auth` service is configured [with a dependency][svc-dependency] to `gitlab-runsvdir.service` aka the Omnibus bundled Gitlab service. If you are using another deployment method you should adapt this dependency
+All settings live in `/etc/mattermost-ssl-auth.env` (template: [`src/etc/mattermost-ssl-auth.env.example`](src/etc/mattermost-ssl-auth.env.example); root-only, mode 600 — it holds a system-admin token). The file is consumed by the systemd unit's `EnvironmentFile`; changing it requires a **full service restart** (nginx `env` directives are main-context only).
+
+| Variable | Example value | Meaning |
+|---|---|---|
+| `MATTERMOST_UPSTREAM` | `http://127.0.0.1:8065` | Base URL of the Mattermost instance behind the proxy (http only; TLS is terminated by the gateway) |
+| `REDIS_URI` | `unix:/run/redis/redis-server.sock` | Redis for the session store — `unix:<path>`, `unix://<path>` or `host:port` |
+| `MATTERMOST_PROVISION_TOKEN` | `<system-admin personal access token>` | System-admin personal access token used to create/repair Mattermost users |
+| `ALLOW_PROVISION` | `true` | `false` disables automatic user creation (auth only) |
+| `MM_DEFAULT_TEAM_ID` | `<default team id>` | Team ID new users are added to during provisioning |
+| `CERT_EMAIL_FIELD` | `emailAddress` | Subject field in the client certificate that holds the user's email |
+| `CERT_NAME_FIELD` | `CN` | Subject field in the client certificate that holds the user's name |
+| `CERT_ADMIN_OU` | `Admins` | Organisation Unit value that grants Mattermost admin rights (empty string disables cert-driven admin) |
+| `USERNAME_FROM_EMAIL` | `true` | Derive the Mattermost username from the local part of the certificate email |
+
+## DN convention
+
+The example PKI (`example/build_certs.sh`) issues:
+
+| Certificate | DN | Provisions |
+|---|---|---|
+| `certs/flo.*` | `/emailAddress=flolou@simple.org/CN=Flo Lou/O=Simple Inc/OU=Admins/C=FR/ST=State/L=City/DC=simple/DC=org` | user `flolou`, display name "Flo Lou", **system admin**, added to the default team |
+| `certs/aze.*` | `/emailAddress=azerty@simple.org/CN=Azé Rtÿiôµ/O=Simple Inc/OU=Users/C=FR/ST=State/L=City/DC=simple/DC=org` | user `azerty`, display name "Azé Rtÿiôµ" (non-ASCII on purpose) |
+
+Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the username is its local part when `USERNAME_FROM_EMAIL=true`; the `CERT_NAME_FIELD` value is split on the first space into first/last name; a certificate whose `OU` equals `CERT_ADMIN_OU` is granted `system_admin`.
+
+## Prerequisites
+
+* Ubuntu 24.04 LTS server (the demo target; any distro with OpenResty works)
+* A client CA you control (the demo builds one)
+* Mattermost 11.x reachable over plain HTTP (the gateway terminates TLS)
+* Redis for the session store
+
+## Caveats
+
+* Session cookies are refreshed only at first login and at `/login` renewal — see [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md).
+* Mattermost rate-limits login to ~5 rps; the gateway backs off and retries (up to 3 attempts).
+* `MATTERMOST_PROVISION_TOKEN` is a **system-admin** personal access token — keep `/etc/mattermost-ssl-auth.env` at mode 600, root-only.
+* `ALLOW_PROVISION=false` is read-only mode: existing users can still authenticate, unknown certificates are never created.
+* One FQDN per gateway — the server name is baked into `nginx.conf`.
+* `ssl_verify_client on` is required; the gateway refuses any request without a valid client certificate.
 
 ## License
 
-Ditributed under Apache-2.0 License. See `LICENSE` for more information.
+Distributed under the Apache-2.0 License. See `LICENSE` for more information.
 
-## Contact
-
-Project Link: https://github.com/fl0l0u/gitlab-ssl-auth
-
-[preview]: images/ssl-auth.png
-[openresty]:            https://openresty.org/en/installation.html
-[disable-gitlab-nginx]: https://docs.gitlab.com/omnibus/settings/nginx.html#using-a-non-bundled-web-server
-[lua-resty-http]:       https://github.com/ledgetech/lua-resty-http
-[openssl-pki-tuto]:     https://pki-tutorial.readthedocs.io/en/latest/#simple-pki
-[ms-adds-acnts]:        https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-default-user-accounts#administrator-account-attributes
-[nginx-conf-lua-dir]: blob/master/src/usr/local/openresty/nginx/conf/nginx.conf#L92
-[username-parsing]:   blob/master/src/usr/local/openresty/nginx/lua/gitlab_lib.lua#L45
-[admin-parsing]:      blob/master/src/usr/local/openresty/nginx/lua/gitlab_lib.lua#L31
-[svc-dependency]:     blob/master/src/etc/systemd/system/gitlab-ssl-auth.service#L4
-[script-cert]:        blob/master/example/build_certs.sh
-[script-install]:     blob/master/example/demo_install.sh
+A port of [fl0l0u/gitlab-ssl-auth](https://github.com/fl0l0u/gitlab-ssl-auth) (Apache-2.0) by fl0l0u.
