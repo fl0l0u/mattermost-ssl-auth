@@ -29,12 +29,14 @@ The browser presents a client certificate over TLS; the gateway maps that certif
 2. The gateway parses the certificate DN: email attribute → username, name attribute → display name, `OU=Admins` → system admin.
 3. If no session is stored for that user yet, the gateway resolves a password (provisioning the user via the admin API when `ALLOW_PROVISION=true`), logs in against `/api/v4/users/login`, and stores the resulting session cookies and Bearer token in Redis.
 4. Every forwarded request gets `Cookie`, `X-CSRF-Token` and `Authorization` overwritten from the stored session, so the browser never carries Mattermost session material.
-5. Navigating to `/login` drops and re-logs in the stored session (renewal).
+5. Navigating to `/login` drops and re-logs in the stored session (renewal), then 302s back to the `Referer` (same-origin only, else `/`).
+6. WebSocket traffic on `/api/v4/websocket` gets the same session injection during the HTTP Upgrade request.
+7. The gateway is fail-closed: a missing or invalid client certificate is refused (400), and any failure in Redis, Mattermost, or the provision token aborts the request with an error — nothing is proxied unauthenticated.
 
 ## Features
 
 * Per-certificate user mapping from the DN (`emailAddress`, `CN`, `OU`)
-* Self-healing login: a stale cached password is rotated (or the user re-provisioned) through the admin API, transparently
+* Self-healing login: a stale cached password is rotated, a soft-deleted (deactivated) user is reactivated, and a hard-deleted user is re-provisioned — transparently, through the admin API
 * `OU=Admins` certificates are provisioned as `system_admin`
 * New users are added to the default team automatically
 * Session state in Redis — survives gateway restarts
@@ -62,7 +64,7 @@ All settings live in `/etc/mattermost-ssl-auth.env` (template: [`src/etc/matterm
 | Variable | Example value | Meaning |
 |---|---|---|
 | `MATTERMOST_UPSTREAM` | `http://127.0.0.1:8065` | Base URL of the Mattermost instance behind the proxy (http only; TLS is terminated by the gateway) |
-| `REDIS_URI` | `unix:/run/redis/redis-server.sock` | Redis for the session store — `unix:<path>`, `unix://<path>` or `host:port` |
+| `REDIS_URI` | `unix:/run/redis/redis-server.sock` | Redis for the session store — `unix:<path>`, bare `host:port`, or `redis://host:port` |
 | `MATTERMOST_PROVISION_TOKEN` | `<system-admin personal access token>` | System-admin personal access token used to create/repair Mattermost users |
 | `ALLOW_PROVISION` | `true` | `false` disables automatic user creation (auth only) |
 | `MM_DEFAULT_TEAM_ID` | `<default team id>` | Team ID new users are added to during provisioning |
@@ -92,12 +94,14 @@ Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the
 ## Caveats
 
 * Session cookies are refreshed only at first login and at `/login` renewal — see [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md).
-* Mattermost rate-limits login to ~5 rps; the gateway backs off and retries (up to 3 attempts).
+* `/login` renewal does not revoke the previous Mattermost session server-side — the gateway simply stops replaying it, and the old session expires by its own ~7-day TTL.
+* Mattermost rate-limits login (5 rps / burst 10); the gateway backs off and retries (up to 3 attempts).
 * `MATTERMOST_PROVISION_TOKEN` is a **system-admin** personal access token — keep `/etc/mattermost-ssl-auth.env` at mode 600, root-only.
 * `ALLOW_PROVISION=false` is read-only mode: existing users can still authenticate, unknown certificates are never created.
 * Username collisions (two certificates whose email local-parts match but whose full emails differ) fail closed with a clear error — the second certificate is not provisioned.
 * One FQDN per gateway — the server name is baked into `nginx.conf`.
 * `ssl_verify_client on` is required; the gateway refuses any request without a valid client certificate.
+* Tested end-to-end against Mattermost 11.10.1 (API behavior source-checked); other 11.x versions should work, but verify your version.
 
 ## License
 
