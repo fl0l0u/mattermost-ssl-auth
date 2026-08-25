@@ -3,8 +3,10 @@ https://github.com/fl0l0u
 ]]
 -- access_by_lua_file, location = /login (session renewal)
 -- 1. INIT
-local ssl = require("mattermost_ssl_auth"):new(ngx.var.ssl_client_s_dn)
-if ngx.var.ssl_client_verify ~= "SUCCESS" then
+-- test ingress (127.0.0.1:8443) seam: undefined on the production server
+local test_dn = ngx.var.mmssl_test_dn; if test_dn == "" then test_dn = nil end
+local ssl = require("mattermost_ssl_auth"):new(test_dn or ngx.var.ssl_client_s_dn)
+if test_dn == nil and ngx.var.ssl_client_verify ~= "SUCCESS" then
     return ssl:fail(ngx.HTTP_FORBIDDEN, "no valid client certificate")
 end
 

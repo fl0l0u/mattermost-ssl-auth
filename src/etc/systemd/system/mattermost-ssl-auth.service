@@ -18,6 +18,9 @@ ProtectHome=true
 # write to these paths (pid + logs).
 ReadWritePaths=/var/log/openresty /var/run/openresty
 EnvironmentFile=/etc/mattermost-ssl-auth.env
+# systemd defaults LimitNOFILE=1024, which makes the workers warn "4096
+# worker_connections exceed open file resource limit".
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
