@@ -4,7 +4,7 @@ https://github.com/fl0l0u
 -- access_by_lua_file, location /
 -- 1. INIT
 -- 1.1. Agent: upstream/redis setup and DN parsing live in the constructor
--- test ingress (127.0.0.1:8443) seam: undefined on the production server
+-- test ingress (127.0.0.1:18443) seam: pinned empty on the production server
 local test_dn = ngx.var.mmssl_test_dn; if test_dn == "" then test_dn = nil end
 local ssl = require("mattermost_ssl_auth"):new(test_dn or ngx.var.ssl_client_s_dn)
 -- 1.2. The TLS layer must have validated the client certificate

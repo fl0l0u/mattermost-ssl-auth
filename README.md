@@ -105,15 +105,15 @@ Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the
 
 ## Testing
 
-`nginx.conf` ships a loopback-only test ingress on `127.0.0.1:8443` (development only) that runs the full proxy pipeline over plain HTTP: instead of a TLS client certificate, it takes the already-unpacked DN from the `X-Test-DN` header, emulating what the real reverse proxy does.
+`nginx.conf` ships a loopback-only test ingress on `127.0.0.1:18443` (development only) that runs the full proxy pipeline over plain HTTP: instead of a TLS client certificate, it takes the already-unpacked DN from the `X-Test-DN` header, emulating what the real reverse proxy does.
 
 ```bash
 curl -H 'Host: mattermost.example.test' \
      -H 'X-Test-DN: emailAddress=who@example.test,CN=Who Test,OU=Users,O=Example Org' \
-     http://127.0.0.1:8443/
+      http://127.0.0.1:18443/
 ```
 
-This exercises provisioning, login, session replay, and self-healing without a client certificate. The `Host` header must be the FQDN so the Origin forwarded to Mattermost matches its SiteURL. The production `:443` server does not define the test variable, so it is unaffected.
+This exercises provisioning, login, session replay, and self-healing without a client certificate. The `Host` header must be the FQDN so the Origin forwarded to Mattermost matches its SiteURL. The production `:443` server pins the test variable to empty, so it is unaffected.
 
 ## License
 
