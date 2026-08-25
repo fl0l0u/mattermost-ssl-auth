@@ -8,11 +8,13 @@ local MattermostSslAuth = {
     _VERSION = '0.1'
 }
 
--- Seed once per worker process; worker-unique enough for lock tokens, and
--- ngx.time works in any load context (including init).
-math.randomseed(ngx.time() * 1000)
+-- Seed once per worker process (the module loads on the worker's first
+-- request, so this runs in worker context). The worker id is mixed in so
+-- workers that start in the same instant get different RNG streams, and
+-- ngx.now()'s sub-second part spreads the initial sequences further.
+math.randomseed(ngx.now() * 1000 + ngx.worker.id())
 
-local LOCK_TTL_MS = 30000
+local LOCK_TTL_MS = 60000
 local LOCK_WAIT_MS = 15000
 local LOCK_POLL_MS = 200
 local HTTP_TIMEOUT_MS = 5000
@@ -103,7 +105,10 @@ local function redis_connect(uri)
     elseif uri:sub(1, 5) == "unix:" then
         ok, err = red:connect(uri)
     else
-        local host, port = uri:match("^([^:]+):(%d+)$")
+        -- Accept the documented "redis://host:port" form as well as a bare
+        -- "host:port"; the scheme is stripped before the host:port match.
+        local bare = uri:match("^redis://(.+)$") or uri
+        local host, port = bare:match("^([^:]+):(%d+)$")
         if not host then
             return nil, "invalid REDIS_URI: " .. uri
         end
@@ -127,13 +132,15 @@ end
 
 -- Release is a compare-and-delete: the lock is deleted only if it still
 -- carries the releasing holder's token. A plain DEL would let a stalled
--- holder delete a lock that expired after 30 s and was re-acquired by
+-- holder delete a lock that expired after 60 s and was re-acquired by
 -- another request.
 local LOCK_RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then " ..
     "return redis.call('del', KEYS[1]) else return 0 end"
 
 local function new_lock_owner()
-    return ngx.now() .. "-" .. math.random(100000, 999999)
+    -- Worker id + sub-second timestamp + RNG: collision-resistant across
+    -- workers even when they load in the same instant.
+    return ngx.worker.id() .. "-" .. ngx.now() .. "-" .. math.random(100000, 999999)
 end
 
 local function json_headers(token)
@@ -286,7 +293,11 @@ function MattermostSslAuth:store_token(token)
     self:redis_set(session_key(self.email, "token"), token)
 end
 
+-- The password is only valid once the account has been provisioned or
+-- rotated under the session lock, so storing it requires still holding that
+-- lock: check_lock() aborts a holder whose lock expired mid-section.
 function MattermostSslAuth:store_password(password)
+    self:check_lock()
     self:redis_set(session_key(self.email, "password"), password)
 end
 
@@ -330,7 +341,7 @@ function MattermostSslAuth:wait_for_session(email)
             return true
         end
 
-        -- The holder may have released the lock or let it expire (30 s TTL)
+        -- The holder may have released the lock or let it expire (60 s TTL)
         -- without publishing a session. Retry the NX set on every poll so
         -- the waiter proceeds instead of burning the full wait window; the
         -- re-acquired lock carries the waiter's own owner for its release.
@@ -348,7 +359,7 @@ function MattermostSslAuth:wait_for_session(email)
 end
 
 -- No-op when we do not hold the lock (e.g. the wait ended in the fast
--- path). Best effort: a failed release is harmless, the 30 s TTL reclaims a
+-- path). Best effort: a failed release is harmless, the 60 s TTL reclaims a
 -- stale lock. The lock is always keyed by self.email — the only email this
 -- instance ever locks — so the parameter is gone.
 function MattermostSslAuth:release_lock()
@@ -357,6 +368,24 @@ function MattermostSslAuth:release_lock()
     end
     self.redisc:eval(LOCK_RELEASE, 1, lock_key(self.email), self.lock_owner)
     self.lock_owner = nil
+end
+
+-- Re-verify that we still hold the session lock. A critical section that
+-- outlives the lock TTL loses it: another request can then re-acquire the
+-- lock and commit its own state. Call this right before committing state
+-- (store_password) so a stale holder aborts instead of overwriting a newer
+-- holder's work.
+function MattermostSslAuth:check_lock()
+    if not self.lock_owner then
+        self:fail(ngx.HTTP_SERVICE_UNAVAILABLE, "session lock expired, retry")
+    end
+    local value, err = self.redisc:get(lock_key(self.email))
+    if err then
+        self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR, "redis GET failed: " .. tostring(err))
+    end
+    if value ~= self.lock_owner then
+        self:fail(ngx.HTTP_SERVICE_UNAVAILABLE, "session lock expired, retry")
+    end
 end
 
 function MattermostSslAuth:random_password()
@@ -502,6 +531,10 @@ function MattermostSslAuth:create_user(password)
         return nil, err
     end
     local body = res:read_body()
+    if res.status == 409 then
+        return nil, "username '" .. self.username ..
+            "' is already taken by another account; use a unique email local-part"
+    end
     if res.status ~= 200 and res.status ~= 201 then
         return nil, "user creation failed with HTTP " .. res.status .. ": " .. body
     end
@@ -619,6 +652,11 @@ function MattermostSslAuth:http_login(password, cookies, csrf)
 
     local session = {}
     local set_cookies = res.headers["Set-Cookie"]
+    -- lua-resty-http returns a single Set-Cookie header as a string and
+    -- multiple ones as a table; normalize a string to a one-element list.
+    if type(set_cookies) == "string" then
+        set_cookies = { set_cookies }
+    end
     if type(set_cookies) == "table" then
         for _, cookie in ipairs(set_cookies) do
             local name, value = string.match(cookie, "^([^=; ]+)=([^; ]+)")
@@ -733,6 +771,11 @@ function MattermostSslAuth:rewrite_request(cookies_string, token, mmcsrf)
 
     local cookie_header = ""
     local request_cookies = ngx.req.get_headers()["Cookie"]
+    if type(request_cookies) == "table" then
+        -- A client may send several Cookie headers; nginx returns them as a
+        -- table, so rejoin into one header before merging.
+        request_cookies = table.concat(request_cookies, "; ")
+    end
     if request_cookies then
         for k, v in string.gmatch(request_cookies, "([^=; ]+)=([^=; ]+)") do
             cookie_header = cookie_header .. k .. "=" .. (stored[k] or v) .. ";"
@@ -765,7 +808,7 @@ end
 function MattermostSslAuth:fail(status, msg)
     -- Release the session lock before terminating: ngx.exit kills the
     -- request, so without this a failure inside the critical section would
-    -- leave the 30 s lock behind and every waiter for the same email would
+    -- leave the 60 s lock behind and every waiter for the same email would
     -- burn its 15 s wait window and time out with 504.
     self:release_lock()
     ngx.log(ngx.ERR, "[lua] ", msg)

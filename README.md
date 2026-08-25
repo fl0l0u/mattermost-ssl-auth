@@ -95,6 +95,7 @@ Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the
 * Mattermost rate-limits login to ~5 rps; the gateway backs off and retries (up to 3 attempts).
 * `MATTERMOST_PROVISION_TOKEN` is a **system-admin** personal access token — keep `/etc/mattermost-ssl-auth.env` at mode 600, root-only.
 * `ALLOW_PROVISION=false` is read-only mode: existing users can still authenticate, unknown certificates are never created.
+* Username collisions (two certificates whose email local-parts match but whose full emails differ) fail closed with a clear error — the second certificate is not provisioned.
 * One FQDN per gateway — the server name is baked into `nginx.conf`.
 * `ssl_verify_client on` is required; the gateway refuses any request without a valid client certificate.
 

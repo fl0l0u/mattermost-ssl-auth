@@ -23,6 +23,10 @@ end
 -- only the session cookies
 local stale = {}
 local request_cookies = ngx.req.get_headers()["Cookie"]
+if type(request_cookies) == "table" then
+    -- A client may send several Cookie headers; rejoin into one before parsing.
+    request_cookies = table.concat(request_cookies, "; ")
+end
 if request_cookies then
     for k, v in string.gmatch(request_cookies, "([^=; ]+)=([^=; ]+)") do
         if k == "MMAUTHTOKEN" or k == "MMUSERID" or k == "MMCSRF" then
@@ -50,11 +54,28 @@ ssl:store_cookies(cookies)
 ssl:store_token(token)
 
 -- 3. REDIRECT BACK
+-- Honor the Referer only when it is same-origin: a relative path starting
+-- with a single "/" (not "//", which is protocol-relative, and not "/.."),
+-- or an absolute https:// URL whose host matches this gateway's host
+-- (case-insensitively). Anything else — including a referer that points back
+-- at /login, which would re-trigger this hook in a loop — redirects to "/".
 local referer = ngx.req.get_headers()["Referer"]
 if type(referer) == "table" then
     referer = referer[1]
 end
-if not referer or referer:match("^https?://[^/]+/login$") then
+
+local function is_same_origin(path)
+    if not path then
+        return false
+    end
+    if path:sub(1, 1) == "/" and path:sub(1, 2) ~= "//" and path:sub(1, 3) ~= "/.." then
+        return true
+    end
+    local host = path:match("^https://([^/]+)")
+    return host ~= nil and ngx.lower(host) == ngx.lower(ngx.var.host)
+end
+
+if not is_same_origin(referer) or referer:match("/login$") then
     return ngx.redirect("/")
 end
 return ngx.redirect(referer)
