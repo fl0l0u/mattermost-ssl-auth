@@ -72,7 +72,7 @@ local function is_same_origin(path)
         return true
     end
     local host = path:match("^https://([^/]+)")
-    return host ~= nil and ngx.lower(host) == ngx.lower(ngx.var.host)
+    return host ~= nil and string.lower(host) == string.lower(ngx.var.host)
 end
 
 if not is_same_origin(referer) or referer:match("/login$") then
