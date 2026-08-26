@@ -250,6 +250,7 @@ install -m 600 -o root -g root "$REPO_ROOT/src/etc/mattermost-ssl-auth.env.examp
 # Redis over loopback TCP: the distro unix socket is 700 redis:redis, which
 # the nginx workers (nobody) cannot reach.
 sed -i 's|^REDIS_URI=.*|REDIS_URI=redis://127.0.0.1:6379|' /etc/mattermost-ssl-auth.env
+sed -i "s|^MATTERMOST_SITE_URL=.*|MATTERMOST_SITE_URL=${MM_SITE_URL}|" /etc/mattermost-ssl-auth.env
 sed -i "s|^MATTERMOST_PROVISION_TOKEN=.*|MATTERMOST_PROVISION_TOKEN=${MM_PAT}|" /etc/mattermost-ssl-auth.env
 sed -i "s|^MM_DEFAULT_TEAM_ID=.*|MM_DEFAULT_TEAM_ID=${MM_TEAM_ID}|" /etc/mattermost-ssl-auth.env
 
