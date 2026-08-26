@@ -281,10 +281,15 @@ echo "  smoke test: present the admin demo certificate"
 # the PKI; a re-run on an existing deployment (certs already in
 # /etc/ssl/private) skips the build and has no local client certs.
 if [ -f "$SCRIPT_DIR/certs/flo.crt" ]; then
-  curl -fsS --cacert "$SCRIPT_DIR/ca/root-ca.crt" \
+  # The server cert is signed by the signing CA, so verify against the
+  # full chain (signing + root) — root alone cannot validate it.
+  SMOKE_CA="$(mktemp)"
+  cat "$SCRIPT_DIR/ca/signing-ca.crt" "$SCRIPT_DIR/ca/root-ca.crt" > "$SMOKE_CA"
+  curl -fsS --cacert "$SMOKE_CA" \
     --cert "$SCRIPT_DIR/certs/flo.crt" --key "$SCRIPT_DIR/certs/flo.key" \
     --resolve "${MM_FQDN}:443:127.0.0.1" "https://${MM_FQDN}/api/v4/users/me" \
     | python3 -m json.tool
+  rm -f "$SMOKE_CA"
 else
   echo "  (skipped: no demo client certs in $SCRIPT_DIR — verify $MM_FQDN with a trusted client certificate)"
 fi
