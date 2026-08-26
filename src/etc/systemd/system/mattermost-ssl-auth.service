@@ -14,9 +14,19 @@ PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+# State directories, created by systemd on a fresh install:
+#   RuntimeDirectory  /run/openresty        (pid file)
+#   LogsDirectory   /var/log/openresty      (error + access logs)
+#   StateDirectory  /var/lib/openresty      (nginx temp files)
+# Without these the ReadWritePaths= entries below point at missing paths
+# and systemd aborts with status=226/NAMESPACE before nginx even starts.
+RuntimeDirectory=openresty
+LogsDirectory=openresty
+StateDirectory=openresty
 # ProtectSystem=strict makes the filesystem read-only; nginx can only
-# write to these paths (pid + logs).
-ReadWritePaths=/var/log/openresty /var/run/openresty
+# write to these paths (pid + logs + temp files). The temp tree must be
+# owned by the worker user (see example/demo_install.sh).
+ReadWritePaths=/var/run/openresty /var/log/openresty /var/lib/openresty
 EnvironmentFile=/etc/mattermost-ssl-auth.env
 # systemd defaults LimitNOFILE=1024, which makes the workers warn "4096
 # worker_connections exceed open file resource limit".

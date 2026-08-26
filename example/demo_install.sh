@@ -10,7 +10,9 @@
 #   5. PKI from build_certs.sh -> /etc/ssl/private/{mattermost.crt,mattermost.key,client-ca.crt}
 #   6. lua-resty-http v0.17.1 -> /usr/local/openresty/nginx/lua/resty/
 #   7. repo src/ -> /usr/local + /etc/systemd/system (existing files backed up)
-#   8. /etc/mattermost-ssl-auth.env (root:600) + systemctl + openresty -t
+#   8. /etc/mattermost-ssl-auth.env (root:600)
+#   9. proxy state dirs (logs/pid/temp) + worker ownership
+#  10. systemctl + openresty -t
 #
 # Run as root:  sudo bash example/demo_install.sh
 # Safe to re-run: every step is idempotent (secrets are persisted in
@@ -221,6 +223,23 @@ install -m 600 -o root -g root "$REPO_ROOT/src/etc/mattermost-ssl-auth.env.examp
 sed -i 's|^REDIS_URI=.*|REDIS_URI=redis://127.0.0.1:6379|' /etc/mattermost-ssl-auth.env
 sed -i "s|^MATTERMOST_PROVISION_TOKEN=.*|MATTERMOST_PROVISION_TOKEN=${MM_PAT}|" /etc/mattermost-ssl-auth.env
 sed -i "s|^MM_DEFAULT_TEAM_ID=.*|MM_DEFAULT_TEAM_ID=${MM_TEAM_ID}|" /etc/mattermost-ssl-auth.env
+
+echo "9.5. Proxy state directories (must exist before first start)"
+# ProtectSystem=strict mounts the nginx prefix read-only, so on a fresh
+# install nginx cannot create its state paths itself. The unit's
+# RuntimeDirectory=/LogsDirectory=/StateDirectory= entries create these on
+# start (a missing ReadWritePaths= target aborts with 226/NAMESPACE),
+# but the temp tree additionally needs the worker user as owner: the
+# workers — not the root master — write the temp files.
+install -d /var/log/openresty /var/run/openresty
+install -d /var/lib/openresty/client_body_temp /var/lib/openresty/fastcgi_temp \
+  /var/lib/openresty/proxy_temp /var/lib/openresty/scgi_temp /var/lib/openresty/uwsgi_temp
+WORKER_USER="$({ /usr/local/openresty/nginx/sbin/nginx -V 2>&1 || true; } \
+  | grep -oE -- '--user=[A-Za-z0-9_]{2,}' || true)"
+WORKER_USER="${WORKER_USER#--user=}"
+WORKER_USER="${WORKER_USER:-nobody}"
+echo "  worker user: ${WORKER_USER}"
+chown -R "$WORKER_USER" /var/lib/openresty
 
 echo "10. Start gateway"
 systemctl daemon-reload
