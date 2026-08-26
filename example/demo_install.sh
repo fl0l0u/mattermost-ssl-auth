@@ -135,30 +135,59 @@ else
   chmod 600 "$ADMIN_PASS_FILE"
 fi
 
-if [ "$(curl -s -o /dev/null -w '%{http_code}' "$API/users/id/${MM_ADMIN_USER}")" != "200" ]; then
+# The session token arrives as a `Token:` response header. The -D dump is
+# CRLF; strip the \r — a CR inside Authorization makes Mattermost reject
+# the request with a bare "400 Bad Request".
+mm_login() {
+  curl -fsS -D - -o /dev/null -X POST -H "Content-Type: application/json" \
+    -d "{\"login_id\":\"${MM_ADMIN_EMAIL}\",\"password\":\"${MM_ADMIN_PASS}\"}" \
+    "$API/users/login" | tr -d '\r' | awk 'tolower($1) == "token:" {print $2}'
+}
+
+# Existence is detected by logging in: GET /api/v4/users/id/{username}
+# was removed from the Mattermost API (routing 404 on 11.x), and login
+# also hands us the session token the PAT management below needs.
+MM_ADMIN_TOKEN="$(mm_login || true)"
+if [ -z "$MM_ADMIN_TOKEN" ]; then
   # Local mode makes the FIRST user created the system admin; no promotion needed.
   curl -fsS -X POST -H "Content-Type: application/json" \
     -d "{\"username\":\"${MM_ADMIN_USER}\",\"email\":\"${MM_ADMIN_EMAIL}\",\"password\":\"${MM_ADMIN_PASS}\",\"email_verified\":true}" \
     "$API/users" >/dev/null
   echo "  created first (system-admin) user ${MM_ADMIN_USER}"
+  MM_ADMIN_TOKEN="$(mm_login)" \
+    || { echo "admin login failed — delete ${ADMIN_PASS_FILE} (and the admin user) to reset"; exit 1; }
 else
   echo "  admin user ${MM_ADMIN_USER} already exists"
 fi
-MM_ADMIN_ID="$(curl -fsS "$API/users/id/${MM_ADMIN_USER}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')"
+# /users/me (authenticated) replaces the removed /users/id/{username}.
+MM_ADMIN_ID="$(curl -fsS -H "Authorization: Bearer ${MM_ADMIN_TOKEN}" "$API/users/me" \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')"
 
-# Session token for the admin (used only to manage the PAT).
-MM_ADMIN_TOKEN="$(curl -fsS -D - -o /dev/null -X POST -H "Content-Type: application/json" \
-  -d "{\"login_id\":\"${MM_ADMIN_EMAIL}\",\"password\":\"${MM_ADMIN_PASS}\"}" \
-  "$API/users/login" | awk 'tolower($1) == "token:" {print $2}')" \
-  || { echo "admin login failed — delete ${ADMIN_PASS_FILE} (and the admin user) to reset"; exit 1; }
-
-# Reuse the provisioning PAT when a previous run created it.
-MM_PAT="$(curl -fsS "$API/users/${MM_ADMIN_ID}/tokens" -H "Authorization: Bearer ${MM_ADMIN_TOKEN}" \
-  | python3 -c "import json, sys; print(next((t['token'] for t in json.load(sys.stdin) if t['name'] == '${MM_PAT_NAME}'), ''))")"
-if [ -z "$MM_PAT" ]; then
+# 11.x PAT notes: there is no `name` field (match on `description`), the
+# create response is a single object (not a list), `description` is
+# mandatory, the list response never exposes the secret, and no
+# delete/revoke route exists — so the secret is only available at
+# creation time and must be persisted to survive re-runs.
+PAT_FILE="${CRED_DIR}/pat"
+MM_PAT=""
+[ -f "$PAT_FILE" ] && MM_PAT="$(cat "$PAT_FILE")"
+MM_PAT_EXISTS="$(curl -fsS "$API/users/${MM_ADMIN_ID}/tokens" -H "Authorization: Bearer ${MM_ADMIN_TOKEN}" \
+  | python3 -c "import json, sys; print(any(t['description'] == 'mattermost-ssl-auth user provisioning' for t in json.load(sys.stdin)))")"
+if [ "$MM_PAT_EXISTS" = "True" ] && [ -n "$MM_PAT" ]; then
+  echo "  reusing existing PAT ${MM_PAT_NAME}"
+elif [ "$MM_PAT_EXISTS" = "True" ]; then
+  echo "  PAT ${MM_PAT_NAME} exists but its secret is not in ${PAT_FILE}"; exit 1
+else
   MM_PAT="$(curl -fsS -X POST -H "Authorization: Bearer ${MM_ADMIN_TOKEN}" -H "Content-Type: application/json" \
-    -d "{\"name\":\"${MM_PAT_NAME}\"}" "$API/users/${MM_ADMIN_ID}/tokens" \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["token"])')"
+    -d "{\"name\":\"${MM_PAT_NAME}\",\"description\":\"mattermost-ssl-auth user provisioning\"}" \
+    "$API/users/${MM_ADMIN_ID}/tokens" \
+    | python3 -c 'import json, sys
+tok = json.load(sys.stdin)
+if isinstance(tok, list):
+    tok = tok[0]
+print(tok["token"])')"
+  printf '%s' "$MM_PAT" > "$PAT_FILE"
+  chmod 600 "$PAT_FILE"
   echo "  created PAT ${MM_PAT_NAME}"
 fi
 
