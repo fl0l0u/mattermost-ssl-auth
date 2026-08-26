@@ -19,6 +19,12 @@ local LOCK_WAIT_MS = 15000
 local LOCK_POLL_MS = 200
 local HTTP_TIMEOUT_MS = 5000
 local LOGIN_MAX_ATTEMPTS = 3
+-- The health check is best effort: it caps its lock wait shorter than the
+-- cold path and gives up (the next request retries) instead of 504-ing.
+local HEALTH_LOCK_WAIT_MS = 10000
+-- The liveness probe's own timeout. A probe that fails or times out is
+-- "unknown" (the session is left alone), so a generous cap is safe.
+local PROBE_TIMEOUT_MS = 10000
 
 local DEFAULT_UPSTREAM = "http://127.0.0.1:8065"
 local DEFAULT_REDIS_URI = "unix:/run/redis/redis-server.sock"
@@ -183,21 +189,29 @@ function MattermostSslAuth:new(fqdn)
             "SESSION_MAX_AGE_HOURS must be a non-negative number of hours: " .. max_age_raw)
     end
 
+    local check_interval_raw = env_or("SESSION_CHECK_INTERVAL_SECONDS", "60")
+    local check_interval_s = tonumber(check_interval_raw)
+    if not check_interval_s or check_interval_s <= 0 then
+        self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR,
+            "SESSION_CHECK_INTERVAL_SECONDS must be a positive number of seconds: " .. check_interval_raw)
+    end
+
     local this = {
-        upstream_host       = upstream_host,
-        upstream_port       = upstream_port,
-        redisc              = red,
-        site_url            = site_url,
-        session_max_age_s   = max_age_hours * 3600,
-        soft_fail           = false,
-        provision_token     = env_or("MATTERMOST_PROVISION_TOKEN", ""),
-        allow_provision     = env_bool("ALLOW_PROVISION", false),
-        default_team_id     = env_or("MM_DEFAULT_TEAM_ID", ""),
-        email_field         = env_or("CERT_EMAIL_FIELD", "emailAddress"),
-        name_field          = env_or("CERT_NAME_FIELD", "CN"),
-        admin_ou            = admin_ou,
-        username_from_email = env_bool("USERNAME_FROM_EMAIL", true),
-        lock_owner          = nil,
+        upstream_host              = upstream_host,
+        upstream_port              = upstream_port,
+        redisc                     = red,
+        site_url                   = site_url,
+        session_max_age_s          = max_age_hours * 3600,
+        session_check_interval_s   = check_interval_s,
+        soft_fail                  = false,
+        provision_token            = env_or("MATTERMOST_PROVISION_TOKEN", ""),
+        allow_provision            = env_bool("ALLOW_PROVISION", false),
+        default_team_id            = env_or("MM_DEFAULT_TEAM_ID", ""),
+        email_field                = env_or("CERT_EMAIL_FIELD", "emailAddress"),
+        name_field                 = env_or("CERT_NAME_FIELD", "CN"),
+        admin_ou                   = admin_ou,
+        username_from_email        = env_bool("USERNAME_FROM_EMAIL", true),
+        lock_owner                 = nil,
     }
     self.__index = self
     setmetatable(this, self)
@@ -399,6 +413,34 @@ function MattermostSslAuth:wait_for_session(email)
     return false
 end
 
+-- Polls for the per-email session lock until it is ours or the wait window
+-- is exhausted. Unlike wait_for_session() there is no "a session already
+-- exists, stop waiting" fast path: a renewal waiter must hold the lock
+-- before re-checking the age marker, so it waits for the holder to release
+-- (or expire the 60 s TTL) and then re-acquires.
+function MattermostSslAuth:wait_for_lock(email, wait_ms)
+    local waited = 0
+    while waited < wait_ms do
+        ngx.sleep(LOCK_POLL_MS / 1000)
+        waited = waited + LOCK_POLL_MS
+
+        -- The holder may have released the lock or let it expire; retry the
+        -- NX set on every poll so the waiter proceeds instead of burning
+        -- the full wait window; the re-acquired lock carries the waiter's
+        -- own owner for its release.
+        local owner = new_lock_owner()
+        local ok, err = self.redisc:set(lock_key(email), owner, "PX", LOCK_TTL_MS, "NX")
+        if err then
+            self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR, "failed to re-acquire session lock while waiting: " .. tostring(err))
+        end
+        if ok == "OK" then
+            self.lock_owner = owner
+            return true
+        end
+    end
+    return false
+end
+
 -- No-op when we do not hold the lock (e.g. the wait ended in the fast
 -- path). Best effort: a failed release is harmless, the 60 s TTL reclaims a
 -- stale lock. The lock is always keyed by self.email — the only email this
@@ -443,10 +485,11 @@ function MattermostSslAuth:random_password()
 end
 
 -- One fresh client per request: a lua-resty-http client holds a single
--- connection, and a fresh client per call keeps every failure local.
-function MattermostSslAuth:api_request(method, path, body, headers)
+-- connection, and a fresh client per call keeps every failure local. The
+-- timeout defaults to HTTP_TIMEOUT_MS; the health probe passes its own.
+function MattermostSslAuth:api_request(method, path, body, headers, timeout_ms)
     local c = http:new()
-    c:set_timeout(HTTP_TIMEOUT_MS)
+    c:set_timeout(timeout_ms or HTTP_TIMEOUT_MS)
     local ok, err = c:connect(self.upstream_host, self.upstream_port)
     if not ok then
         return nil, "connection failed to Mattermost: " .. tostring(err)
@@ -853,94 +896,114 @@ end
 
 -- A session is fresh while its age marker is within
 -- SESSION_MAX_AGE_HOURS. A missing or unparseable marker counts as stale:
--- an age-unknown session is renewed rather than served.
-function MattermostSslAuth:is_session_fresh()
-    local since = self:get_since()
+-- an age-unknown session is renewed rather than served. The marker may be
+-- passed in to save a redis GET when the caller already read it.
+function MattermostSslAuth:is_session_fresh(since)
+    since = since or self:get_since()
     return since ~= nil and ngx.now() - since <= self.session_max_age_s
 end
 
--- Proactive session renewal: re-login before the stored session can die,
--- so the SPA never has to. Returns one of:
---   "miss"     no stored session; the caller does the normal cold path.
---   "fresh"    the stored session is within the renewal age; serve it.
---   "renewed"  a fresh session was just established; serve the stored
---              values.
---   "degraded" renewal failed: the pre-renewal session is restored and
---              served as-is (the 401 intercept gets another chance on
---              the next request).
-function MattermostSslAuth:maybe_renew_session()
-    local cookies = self:get_cookies()
-    if not cookies then
-        return "miss"
+-- Access-phase liveness check, called by the default hook on the fast path
+-- before the request is rewritten: a stored session that is over age, or
+-- that a probe just found dead (401), is re-established here, while the
+-- request is still in flight. Throttled per user
+-- (SESSION_CHECK_INTERVAL_SECONDS). Never fails the request: a failure
+-- logs a WARN and the request proceeds with whatever is stored (the next
+-- request retries).
+function MattermostSslAuth:health_check()
+    -- soft_fail + pcall: a fail() inside the check raises a catchable
+    -- error instead of terminating the request.
+    self.soft_fail = true
+    local ok, err = pcall(self.check_session_health, self)
+    self.soft_fail = false
+    if not ok then
+        ngx.log(ngx.WARN, "[lua] session health check skipped: " .. tostring(err))
     end
-    if self:is_session_fresh() then
-        return "fresh"
+end
+
+-- The health check proper; runs under soft_fail (see health_check).
+function MattermostSslAuth:check_session_health()
+    -- 1. No stored token, nothing to check (the caller does the cold path).
+    local token = self:get_token()
+    if not token then
+        return
     end
 
-    -- Stale or age-unknown. Serialize the renewal per email: only the
-    -- lock holder re-logs in, the others wait and reuse the result.
+    -- 2. Throttle: at most one check per user per interval. A missing
+    --    shared dict (not declared in nginx.conf) skips the throttle but
+    --    not the check.
+    local throttle = ngx.shared.mmssl_sessions
+    local throttle_key = "chk:" .. self.email
+    if throttle then
+        if throttle:get(throttle_key) then
+            return
+        end
+        throttle:set(throttle_key, 1, self.session_check_interval_s)
+    end
+
+    -- 3. Age first: an over-age (or age-unknown) session is renewed
+    --    without probing — the probe costs a round trip the age check
+    --    already answered.
+    local since = self:get_since()
+    local stale = not self:is_session_fresh(since)
+
+    -- 4. Otherwise probe the stored token: 200 healthy, 401 dead, anything
+    --    else (or a failed probe) unknown — don't touch the session.
+    local t_probe
+    if not stale then
+        local res, err = self:api_request(
+            "GET", "/api/v4/users/me", nil, json_headers(token), PROBE_TIMEOUT_MS)
+        if not res then
+            ngx.log(ngx.WARN, "[lua] session health probe failed: " .. tostring(err))
+            return
+        end
+        if res.status ~= 401 then
+            return
+        end
+        t_probe = ngx.now()
+    end
+
+    -- 5. Dead (401) or stale: renew under the per-email lock so parallel
+    --    requests serialize. Best effort: if the lock is not ours in time,
+    --    the next request retries.
     if not self:acquire_lock(self.email) then
-        if not self:wait_for_session(self.email) then
-            self:fail(ngx.HTTP_GATEWAY_TIMEOUT, "timed out waiting for session renewal")
+        if not self:wait_for_lock(self.email, HEALTH_LOCK_WAIT_MS) then
+            return
         end
     end
+
     -- Re-check under the lock: a peer may have renewed while we waited.
-    if self:is_session_fresh() then
+    local fresh_since = self:get_since()
+    local peer_renewed
+    if stale then
+        peer_renewed = self:is_session_fresh(fresh_since)
+    else
+        peer_renewed = fresh_since ~= nil and fresh_since >= t_probe
+    end
+    if peer_renewed then
         self:release_lock()
-        return "fresh"
+        return
     end
 
     -- Snapshot what is about to be replaced, for the degraded path.
-    local token = self:get_token()
-    local since = self:get_since()
-    local ok, err = self:try_establish()
+    local cookies, snapshot_token, snapshot_since =
+        self:get_cookies(), self:get_token(), self:get_since()
+    local ok, err = self:try_establish(nil, nil)
     self:release_lock()
     if not ok then
-        ngx.log(ngx.WARN,
-            "[lua] session renewal failed, serving existing session: " .. tostring(err))
         -- The critical section deleted the stale session before failing;
-        -- put it back so the caller still has something to serve. A peer
+        -- put it back so the request still has something to serve. A peer
         -- that renewed in the meantime republished first and wins.
-        if not self:get_cookies() then
+        if cookies and not self:get_cookies() then
             self:store_cookies(cookies)
-            self:store_token(token)
-            if since then
-                self:store_since(since)
+            self:store_token(snapshot_token)
+            if snapshot_since then
+                self:store_since(snapshot_since)
             end
         end
-        return "degraded"
+        ngx.log(ngx.WARN,
+            "[lua] session renewal failed, serving existing session: " .. tostring(err))
     end
-    return "renewed"
-end
-
--- Reactive renewal for a request whose upstream response was just 401:
--- the stored session is dead, re-establish it. A peer that renewed
--- after our 401 (age marker >= the 401 moment) makes a replay with the
--- stored session valid, which is the fast skip. Returns true (renewed,
--- or already fresh by a peer), or nil + err — never terminates the
--- request: the 401 must pass through to the client unchanged.
-function MattermostSslAuth:renew_for_401()
-    local t401 = ngx.now()
-    local since = self:get_since()
-    if since and since >= t401 then
-        return true
-    end
-    if not self:acquire_lock(self.email) then
-        if not self:wait_for_session(self.email) then
-            return nil, "timed out waiting for session renewal"
-        end
-    end
-    since = self:get_since()
-    if since and since >= t401 then
-        self:release_lock()
-        return true
-    end
-    local ok, err = self:try_establish()
-    self:release_lock()
-    if not ok then
-        return nil, err
-    end
-    return true
 end
 
 -- Rebuilds the Cookie header of the proxied request: stored values win per

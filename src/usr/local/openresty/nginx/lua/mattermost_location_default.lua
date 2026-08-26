@@ -13,20 +13,27 @@ if test_dn == nil and ngx.var.ssl_client_verify ~= "SUCCESS" then
 end
 
 local function inject_session(cookies, token)
+    -- Stash the session for the cookie-hydration header filter (pure Lua):
+    -- it turns the stored cookie string into the Set-Cookie headers that
+    -- populate the browser's jar.
+    ngx.ctx.mmssl = { cookie_string = cookies, token = token }
     return ssl:rewrite_request(cookies, token, cookies:match("MMCSRF=([^=; ]+)"))
 end
 
--- 2. FETCH SESSION (with proactive renewal)
--- "fresh", "renewed", and "degraded" all mean the stored session is
--- usable: fresh is within the renewal age, renewed was just re-logged
--- in, degraded kept its pre-renewal session after a failed renewal.
-local state = ssl:maybe_renew_session()
-if state ~= "miss" then
-    return inject_session(ssl:get_cookies(), ssl:get_token())
-end
+-- 2. HEALTH CHECK (throttled liveness, access phase): a stored session
+-- that is over age, or that the probe just found dead (401), is
+-- re-established here, before the request is rewritten. Never fails the
+-- request: a broken renewal serves whatever is stored.
+ssl:health_check()
 
--- 2.1. CREATE NEW SESSION (cold path): the agent owns the per-email
--- lock and exits on every failure, so a returned session is stored
--- and fresh
-local cookies, token = ssl:establish_session(nil, nil)
+-- 3. FETCH SESSION — read after the health check so a renewal's freshly
+-- stored values are what gets replayed
+local cookies = ssl:get_cookies()
+local token = ssl:get_token()
+if not cookies then
+    -- 3.1. CREATE NEW SESSION (cold path): the agent owns the per-email
+    -- lock and exits on every failure, so a returned session is stored
+    -- and fresh
+    cookies, token = ssl:establish_session(nil, nil)
+end
 return inject_session(cookies, token)
