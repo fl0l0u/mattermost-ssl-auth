@@ -29,9 +29,10 @@ The browser presents a client certificate over TLS; the gateway maps that certif
 2. The gateway parses the certificate DN: email attribute → username, name attribute → display name, `OU=Admins` → system admin.
 3. If no session is stored for that user yet, the gateway resolves a password (provisioning the user via the admin API when `ALLOW_PROVISION=true`), logs in against `/api/v4/users/login`, and stores the resulting session cookies and Bearer token in Redis.
 4. Every forwarded request gets `Cookie`, `X-CSRF-Token` and `Authorization` overwritten from the stored session, so the browser never carries Mattermost session material.
-5. The stored session is renewed two ways ([ADR 0002](docs/adr/0002-session-renewal-replay.md)): **proactively**, it is re-logged in on a later request once it is older than `SESSION_MAX_AGE_HOURS` (the old session stays valid, so the switchover is seamless); **reactively**, on an upstream 401 for `/api/v4/*` the gateway re-establishes the session in the log phase, right after that response is sent — the browser may have seen that one 401 (the SPA may briefly show its login screen); recovery is automatic on the next request / page refresh / full-page `/login`. The webapp itself never requests `/login` — it routes to the login screen client-side — so `/login` is a manual trigger only: a navigation there drops and re-logs in the session, then 302s back to the `Referer` (same-origin only, else `/`).
-6. WebSocket traffic on `/api/v4/websocket` gets the same session injection during the HTTP Upgrade request.
-7. The gateway is fail-closed: a missing or invalid client certificate is refused (400), and any failure in Redis, Mattermost, or the provision token aborts the request with an error — nothing is proxied unauthenticated.
+5. The stored session is kept alive by an **access-phase liveness check** ([ADR 0002](docs/adr/0002-session-renewal-replay.md)): throttled per user to one check per `SESSION_CHECK_INTERVAL_SECONDS` (60 s), it first compares the session's age against `SESSION_MAX_AGE_HOURS` (20 h) and, if still fresh, probes it with a `GET /api/v4/users/me`. An over-age or 401-probed session is re-logged in **while the request is still in flight**, under the per-user Redis lock; the check never fails the request (a failed renewal restores the previous session and the next request retries). The webapp itself never requests `/login` — it routes to the login screen client-side — so `/login` is a manual trigger only: a navigation there drops and re-logs in the session, then 302s back to the `Referer` (same-origin only, else `/`).
+6. A pure-Lua header filter **hydrates the browser's cookie jar**: on `location /` the gateway sends the stored `MMAUTHTOKEN`, `MMUSERID` and `MMCSRF` as `Set-Cookie` (attributes mirror Mattermost's own login response — `HttpOnly` on `MMAUTHTOKEN` only, `Secure` only over TLS), so a fresh browser boots straight into the logged-in app even though no Mattermost cookie ever crosses the wire.
+7. WebSocket traffic on `/api/v4/websocket` gets the same session injection during the HTTP Upgrade request.
+8. The gateway is fail-closed: a missing or invalid client certificate is refused (400), and any failure in Redis, Mattermost, or the provision token aborts the request with an error — nothing is proxied unauthenticated.
 
 ## Features
 
@@ -40,7 +41,8 @@ The browser presents a client certificate over TLS; the gateway maps that certif
 * `OU=Admins` certificates are provisioned as `system_admin`
 * New users are added to the default team automatically
 * Session state in Redis — survives gateway restarts
-* Session renewal: proactive re-login at `SESSION_MAX_AGE_HOURS` (invisible), plus reactive log-phase renewal on an upstream 401 — one 401 may be visible after a sudden session death, and the next request gets the fresh session ([ADR 0002](docs/adr/0002-session-renewal-replay.md))
+* Session liveness check: an over-age (`SESSION_MAX_AGE_HOURS`) or dead (401-probed) stored session is re-logged in during the request itself, throttled per user (`SESSION_CHECK_INTERVAL_SECONDS`) — invisible in steady state; after a sudden invalidation at most ~60 s of 401s before the transparent in-access renewal ([ADR 0002](docs/adr/0002-session-renewal-replay.md))
+* Fresh-browser cookie-jar hydration: the stored session's cookies are set on the browser at `/`, so a fresh browser boots straight into the logged-in app
 * `/login` remains a manual renewal trigger (the webapp never requests it — client-side routing)
 * WebSocket support (`/api/v4/websocket`)
 * Audit access log: every request records the presenting certificate (verify status, fingerprint, DN); sensitive query params (`token`, `code`, `invite_id`) are redacted
@@ -74,7 +76,8 @@ All settings live in `/etc/mattermost-ssl-auth.env` (template: [`src/etc/matterm
 | `CERT_NAME_FIELD` | `CN` | Subject field in the client certificate that holds the user's name |
 | `CERT_ADMIN_OU` | `Admins` | Organisation Unit value that grants Mattermost admin rights (empty string disables cert-driven admin) |
 | `USERNAME_FROM_EMAIL` | `true` | Derive the Mattermost username from the local part of the certificate email |
-| `SESSION_MAX_AGE_HOURS` | `20` | Proactive renewal: re-log in the stored session once it is older than this (hours), before the upstream can kill it |
+| `SESSION_MAX_AGE_HOURS` | `20` | Liveness check: a stored session older than this (hours) is renewed without probing, before the upstream can kill it (Mattermost's session TTL is 7+ days by default; 20 h keeps it safely fresh) |
+| `SESSION_CHECK_INTERVAL_SECONDS` | `60` | Per-user throttle for the access-phase liveness check (age check + `users/me` probe); a dead or over-age session is re-logged in synchronously within the check |
 
 ## DN convention
 
@@ -96,8 +99,9 @@ Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the
 
 ## Caveats
 
-* Session renewal is proactive at `SESSION_MAX_AGE_HOURS` (invisible); after a sudden session invalidation one upstream 401 may be visible to the browser — the gateway re-establishes the session in the log phase right after that response, so the next request, refresh, or full-page `/login` succeeds, with at most a refresh needed — see [ADR 0002](docs/adr/0002-session-renewal-replay.md) (supersedes [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md)).
+* Session liveness is checked in the access phase, throttled per user: after a sudden session invalidation (revoke, server-side kill) up to one `SESSION_CHECK_INTERVAL_SECONDS` window (~60 s) of 401s may reach the browser before the transparent in-access renewal rotates the token — the browser recovers on its next request or a refresh; see [ADR 0002](docs/adr/0002-session-renewal-replay.md) (supersedes [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md)).
 * `/login` is a manual trigger only: the webapp never requests it, because a dead session makes the SPA route to the login screen client-side instead of issuing a request.
+* Mattermost validates the WebSocket `Origin` against the SiteURL (scheme+host, literal port); the proxy presents the correct Origin in production, so browser WebSockets work there. The loopback test ingress therefore cannot carry browser WebSockets — a browser's Origin always carries its port — although `curl` through it works when the Origin matches.
 * Renewal does not revoke the previous Mattermost session server-side — the gateway simply stops replaying it, and the old session expires by its own ~7-day TTL.
 * Mattermost rate-limits login (5 rps / burst 10); the gateway backs off and retries (up to 3 attempts).
 * `MATTERMOST_PROVISION_TOKEN` is a **system-admin** personal access token — keep `/etc/mattermost-ssl-auth.env` at mode 600, root-only.
@@ -118,6 +122,8 @@ curl -H 'Host: mattermost.example.test' \
 ```
 
 This exercises provisioning, login, session replay, and self-healing without a client certificate. The `Host` header must be the FQDN so the Origin forwarded to Mattermost matches its SiteURL. The production `:443` server pins the test variable to empty, so it is unaffected.
+
+Browser scenarios P0–P6 were additionally verified with Playwright against the reference VM: P0 no-DN → 400; P1 fresh-browser cold start boots logged in (0×401 out of 47 requests, jar hydrated); P3 server-side session revoke → 401s only inside the 60 s throttle window, then transparent in-access renewal (token rotated, no `/login` navigation, no reload); P4 forced-stale age → renewal; P5 OU=Admins → system_admin; P6 warm session in a fresh browser → straight to the app, zero logins. A two-user test (flo→aze and aze→flo) delivered messages both directions with 0×401/0×5xx (live unread badges are not observable in headless — no browser WS on the test ingress, see the Origin caveat above; live delivery was proven at protocol level on the production path).
 
 ## License
 

@@ -1,6 +1,6 @@
 # ADR 0001: Refresh the session store only at first login and /login renewal
 
-> **Superseded by [ADR 0002](0002-session-renewal-replay.md)** — login-only refresh cannot trigger because the webapp routes to /login client-side.
+> **Superseded by [ADR 0002](0002-session-renewal-replay.md)** — the webapp never requests /login (client-side routing); session liveness is now checked in the access phase.
 
 - Status: superseded by ADR 0002
 - Date: 2026-08-25

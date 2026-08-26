@@ -94,3 +94,34 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   clean.
 - Code review findings (C2/M1/M2/M3/m1/m4/m9) fixed in
   `51154e7` + `8c6dc38`.
+
+## 2026-08-26 — renewal redesign + browser verification
+
+- Lua files: 4 now — `mattermost_ssl_auth.lua` (core),
+  `mattermost_location_default.lua`, `mattermost_location_login.lua`,
+  `mattermost_cookie_hydration.lua` (pure-Lua
+  `header_filter_by_lua_file` on `location /`, both servers). The old
+  log-phase `mattermost_session_filter.lua` is deleted.
+- `/etc/mattermost-ssl-auth.env` now has 12 values — 3 added on top of
+  the 9 above: `MATTERMOST_SITE_URL=https://mattermost.example.test`;
+  `SESSION_MAX_AGE_HOURS=20`; `SESSION_CHECK_INTERVAL_SECONDS=60`.
+- `nginx.conf`: `lua_shared_dict mmssl_sessions 1m;` — per-user throttle
+  for the access-phase liveness check.
+- OS-level note: OpenResty 1.31.1.1 (apt) disables cosockets in the
+  `header_filter`, `body_filter` and `log` phases (verified
+  empirically). That killed the log-phase renewal design; session
+  liveness is now checked in the access phase (probe, in-access renewal
+  under the per-email Redis lock, never-fails degraded path), and the
+  only filter-phase work is the pure-Lua cookie-jar hydration.
+- Browser verification (Playwright, this VM): P0–P6 all pass — P0 no-DN
+  → 400; P1 fresh-browser cold start boots logged in (0×401/47, jar
+  hydrated); P3 server-side revoke → 401s only inside the 60 s throttle
+  window → transparent in-access renewal (token rotated, no `/login`,
+  no reload); P4 forced-stale age → renewal; P5 OU=Admins →
+  system_admin; P6 fresh browser, warm session → straight to the app,
+  zero logins. Two-user (flo↔aze): messages delivered both directions,
+  0×401/0×5xx.
+- WebSocket: production path verified end-to-end through the proxy
+  (101 + hello with a matching Origin); the loopback test ingress
+  cannot carry browser WS (Mattermost compares the Origin port
+  literally — see ADR 0002).

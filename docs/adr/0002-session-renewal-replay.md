@@ -1,4 +1,4 @@
-# ADR 0002: 401 session renewal — proactive age-based + reactive log-phase
+# ADR 0002: Session liveness check and cookie-jar hydration (access phase)
 
 - Status: accepted
 - Date: 2026-08-26
@@ -6,63 +6,112 @@
 
 ## Context
 
-The Mattermost webapp uses client-side routing. When the browser's session
-dies, the SPA pushes `/login` on the client side (`pushState`) — **no HTTP
-request to `/login` ever reaches the proxy**. A browser navigation to
-`/login` is only ever a human choice, so the login-only refresh of ADR
-0001 can never trigger reliably as a session-renewal mechanism.
+Three facts shape this design:
 
-What actually happens with a dead stored session is worse: the webapp's
-XHRs start answering 401, the SPA treats that as "user logged out" and
-client-side-logs-out — the user is stuck on the login screen even though
-the gateway holds a cached password that could re-log in invisibly. ADR
-0001's assumed failure mode ("the webapp answers 401; the SPA sends the
-browser to `/login`") never occurs: there is no `/login` request to
-answer.
+1. **The webapp never requests `/login`.** Mattermost uses client-side
+   routing: when the browser's session dies, the SPA pushes `/login`
+   client-side (`pushState`) — **no HTTP request to `/login` ever
+   reaches the proxy**. A browser navigation to `/login` is only ever a
+   human choice.
+2. **A dead stored session kills the user's view.** The webapp's XHRs
+   start answering 401, the SPA treats that as "user logged out" and
+   client-side-logs-out. The user is stuck on the login screen even
+   though the gateway holds a cached password that could re-log in
+   invisibly. (ADR 0001's assumed failure mode — "the SPA sends the
+   browser to `/login`" — never occurs: there is no `/login` request to
+   answer.)
+3. **The target OpenResty cannot do reactive work in filter or log
+   phases.** OpenResty 1.31.1.1 (the apt package we support) disables
+   the cosocket API in the `header_filter_by_lua*`, `body_filter_by_lua*`
+   and `log_by_lua*` phases — verified empirically on the reference VM
+   (resty.redis answers "API disabled in the context of the …"). The
+   only filter-phase work that is legal is pure Lua over `ngx`. Any
+   renewal — which needs Redis and a Mattermost API round trip — must
+   happen in a phase with cosockets: the access phase, while the
+   request is still in flight.
 
 ## Decision
 
-Two complementary renewal mechanisms, both server-side:
+One renewal mechanism, plus one filter:
 
-1. **Proactive age-based renewal.** Every request checks the stored
-   session's age against `SESSION_MAX_AGE_HOURS` (default 20). A session
-   older than that is re-logged in while the user is still active. The
-   old session stays valid during the switch, so the switchover is
-   seamless; a failed renewal degrades to serving the existing session.
-2. **Reactive 401 renewal (log phase).** When the upstream answers 401
-   for a `/api/v4/*` request (except `/api/v4/users/login` — a browser
-   login attempt must never be retried), the log-phase handler
-   re-establishes the session immediately **after** the response has been
-   sent to the client — lock-serialized, `:since`-stamped, and
-   peer-aware, so N parallel 401s still cause exactly one login. The
-   browser may have seen that single 401 (the SPA may briefly show its
-   login screen); because the session is re-established immediately, the
-   NEXT request — the SPA fires more XHRs, the user refreshes, or a
-   full-page `/login` hits the renewal hook — succeeds without any user
-   action beyond a refresh in the worst case.
-
-**Why no transparent swap.** A "the browser never sees the 401" design
-needs the cosocket API in the header/body filter phases to renew and
-replay in flight. The target OpenResty (1.31.1.1, the apt package we
-support) disables cosockets in those phases — verified empirically
-(`API disabled in the context of the header_filter_by_lua*` from
-`resty.redis`). A transparent replay would instead have to run in the
-content phase and reimplement the proxy there, which was deemed
-disproportionate. Proactive renewal is what keeps the experience
-invisible in normal operation; the reactive path is the backstop for a
-sudden session death.
-
-`/login` remains as a manual debug trigger.
+1. **Access-phase session liveness check.** On the fast path (a stored
+   session exists), `health_check()` runs in the access phase before
+   the request is proxied. It never fails the request: it runs under
+   `pcall` with a soft-fail flag, and a failure restores the pre-renewal
+   session snapshot so the request proceeds with whatever was stored.
+   Inside the check:
+   * **Throttle** — at most one check per user per
+     `SESSION_CHECK_INTERVAL_SECONDS` (default 60 s), claimed
+     atomically via `lua_shared_dict` (`mmssl_sessions`).
+   * **Age first** — a session older than `SESSION_MAX_AGE_HOURS`
+     (default 20 h), or with a missing/unparseable age marker, is
+     renewed without probing.
+   * **Liveness probe** — otherwise `GET /api/v4/users/me` with the
+     stored Bearer token: 200 → healthy, 401 → dead, anything else or
+     a failed probe → unknown (the session is left alone).
+   * **In-access renewal** — a stale or dead session is re-established
+     synchronously under the per-email Redis lock. Under the lock the
+     stored `since` marker is re-read: a peer that renewed while we
+     waited (`get_since() >= t_probe`) wins and we skip; the lock is
+     re-verified before the final store.
+2. **Cookie-jar hydration (pure-Lua header filter).**
+   `mattermost_cookie_hydration.lua` runs as `header_filter_by_lua_file`
+   on `location /` (both the `:443` and the loopback test servers). It
+   replaces the upstream's `Set-Cookie` headers with the stored
+   `MMAUTHTOKEN`, `MMUSERID` and `MMCSRF`, carrying attributes that
+   mirror Mattermost's own login response: `Path=/; Max-Age=2592000;
+   SameSite=Lax`, `HttpOnly` on `MMAUTHTOKEN` only, `Secure` only when
+   the gateway is served over TLS (the loopback http ingress must
+   hydrate too). Pure Lua — no cosockets — hence phase-legal.
+   * Why: the access hook only rewrites the outbound wire request, but
+     the SPA decides "logged in" from `MMUSERID` in the browser's cookie
+     jar. Without hydration a fresh browser boots on the login form even
+     though every proxied request carries a live session. With it, a
+     fresh browser boots straight into the logged-in app.
+3. **`/login` remains a manual debug trigger** — a navigation there
+   drops and re-logs in the session, then 302s to the `Referer`
+   (same-origin only, else `/`). The webapp never requests it.
 
 ## Consequences
 
-* One extra Lua file, wired as `log_by_lua_file` in the proxied
-  locations; it does nothing unless the upstream just answered 401.
-* The browser can see a single 401 after a sudden session invalidation;
-  the SPA may briefly show its login screen. Recovery is the next
-  request, a refresh, or a full-page `/login`.
-* Worst case (the renewal itself fails, e.g. Mattermost unreachable):
-  nothing is re-established; the next request 401s again and the renewal
-  is retried — degraded, but honest.
-* Each user costs one login per `SESSION_MAX_AGE_HOURS` of activity, far
-  under Mattermost's 5 rps login rate limit.
+* **Worst case after a sudden invalidation** (revoke, server-side
+  kill): up to one throttle interval (~60 s) of 401s, then a
+  transparent in-access renewal — the token rotates under the user,
+  with no navigation and no reload; the browser recovers on its next
+  request or a refresh.
+* **Probe cost:** at most one extra `GET /api/v4/users/me` per user per
+  `SESSION_CHECK_INTERVAL_SECONDS` — negligible against Mattermost's
+  rate limits.
+* **Fresh browsers boot authenticated** (jar hydration); only
+  `MMAUTHTOKEN` is HttpOnly, matching a normal Mattermost login —
+  `MMUSERID`/`MMCSRF` remain script-readable for the SPA.
+* **One shared dict** (`lua_shared_dict mmssl_sessions 1m`) holds the
+  throttle; a missing or full dict degrades to unthrottled checks, not
+  failures.
+* **WebSocket Origin policy (Mattermost 11.10.1, probed
+  experimentally):** the WS upgrade's `Origin` must equal the SiteURL —
+  scheme+host case-insensitive, **port compared literally** (an
+  explicit `:443` is rejected); an empty Origin is allowed. The
+  loopback test ingress can therefore never carry browser WebSockets
+  (a browser's Origin always carries its port); production (page
+  origin == SiteURL) works — verified end-to-end through the proxy
+  (101 + hello).
+* **Browser-verified** (Playwright, reference VM): fresh-browser cold
+  start boots logged in (0×401 out of 47 requests); a server-side
+  session revoke
+  401s only inside the 60 s throttle window, then renews in-access
+  (token rotated, no `/login`, no reload); a forced-stale age renews;
+  two users exchange messages both directions with 0×401/0×5xx.
+
+## Superseded intermediate designs
+
+Both were implemented, verified to be infeasible on the target
+OpenResty, and deleted:
+
+* **Log-phase 401 renewal** — renew after the 401 response is sent, in
+  `log_by_lua_file`. Deleted: the target OpenResty disables cosockets
+  in the log phase, so it cannot renew at all.
+* **Transparent 401 swap/replay** — renew and replay in the header/body
+  filter so the browser never sees the 401. Deleted: it needs cosockets
+  in the filter phases (disabled, same reason) or a content-phase
+  reimplementation of the proxy (disproportionate).
