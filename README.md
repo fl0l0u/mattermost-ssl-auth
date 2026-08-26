@@ -29,7 +29,7 @@ The browser presents a client certificate over TLS; the gateway maps that certif
 2. The gateway parses the certificate DN: email attribute → username, name attribute → display name, `OU=Admins` → system admin.
 3. If no session is stored for that user yet, the gateway resolves a password (provisioning the user via the admin API when `ALLOW_PROVISION=true`), logs in against `/api/v4/users/login`, and stores the resulting session cookies and Bearer token in Redis.
 4. Every forwarded request gets `Cookie`, `X-CSRF-Token` and `Authorization` overwritten from the stored session, so the browser never carries Mattermost session material.
-5. Navigating to `/login` drops and re-logs in the stored session (renewal), then 302s back to the `Referer` (same-origin only, else `/`).
+5. The stored session is renewed transparently, two ways ([ADR 0002](docs/adr/0002-session-renewal-replay.md)): **proactively**, it is re-logged in on a later request once it is older than `SESSION_MAX_AGE_HOURS` (the old session stays valid, so the switchover is seamless); **reactively**, an upstream 401 on `/api/v4/*` is intercepted — the gateway renews the session and replays the original request, so the browser never sees the 401 and never client-side-logs-out (swapped responses carry `X-Session-Renewed: 1`). The webapp itself never requests `/login` — it routes to the login screen client-side — so `/login` is a manual trigger only: a navigation there drops and re-logs in the session, then 302s back to the `Referer` (same-origin only, else `/`).
 6. WebSocket traffic on `/api/v4/websocket` gets the same session injection during the HTTP Upgrade request.
 7. The gateway is fail-closed: a missing or invalid client certificate is refused (400), and any failure in Redis, Mattermost, or the provision token aborts the request with an error — nothing is proxied unauthenticated.
 
@@ -40,7 +40,8 @@ The browser presents a client certificate over TLS; the gateway maps that certif
 * `OU=Admins` certificates are provisioned as `system_admin`
 * New users are added to the default team automatically
 * Session state in Redis — survives gateway restarts
-* `/login` renewal for browser-driven session refresh
+* Transparent session renewal: proactive re-login at `SESSION_MAX_AGE_HOURS`, plus a 401 intercept that renews and replays the request so the browser never sees the 401 ([ADR 0002](docs/adr/0002-session-renewal-replay.md))
+* `/login` remains a manual renewal trigger (the webapp never requests it — client-side routing)
 * WebSocket support (`/api/v4/websocket`)
 * Audit access log: every request records the presenting certificate (verify status, fingerprint, DN); sensitive query params (`token`, `code`, `invite_id`) are redacted
 
@@ -64,6 +65,7 @@ All settings live in `/etc/mattermost-ssl-auth.env` (template: [`src/etc/matterm
 | Variable | Example value | Meaning |
 |---|---|---|
 | `MATTERMOST_UPSTREAM` | `http://127.0.0.1:8065` | Base URL of the Mattermost instance behind the proxy (http only; TLS is terminated by the gateway) |
+| `MATTERMOST_SITE_URL` | `https://mattermost.example.test` | Public URL of Mattermost (SiteURL); the Origin the login is presented from — empty (unset) synthesizes `https://<Host>` |
 | `REDIS_URI` | `unix:/run/redis/redis-server.sock` | Redis for the session store — `unix:<path>`, bare `host:port`, or `redis://host:port` |
 | `MATTERMOST_PROVISION_TOKEN` | `<system-admin personal access token>` | System-admin personal access token used to create/repair Mattermost users |
 | `ALLOW_PROVISION` | `true` | `false` disables automatic user creation (auth only) |
@@ -72,6 +74,7 @@ All settings live in `/etc/mattermost-ssl-auth.env` (template: [`src/etc/matterm
 | `CERT_NAME_FIELD` | `CN` | Subject field in the client certificate that holds the user's name |
 | `CERT_ADMIN_OU` | `Admins` | Organisation Unit value that grants Mattermost admin rights (empty string disables cert-driven admin) |
 | `USERNAME_FROM_EMAIL` | `true` | Derive the Mattermost username from the local part of the certificate email |
+| `SESSION_MAX_AGE_HOURS` | `20` | Proactive renewal: re-log in the stored session once it is older than this (hours), before the upstream can kill it |
 
 ## DN convention
 
@@ -93,8 +96,9 @@ Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the
 
 ## Caveats
 
-* Session cookies are refreshed only at first login and at `/login` renewal — see [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md).
-* `/login` renewal does not revoke the previous Mattermost session server-side — the gateway simply stops replaying it, and the old session expires by its own ~7-day TTL.
+* Session renewal is transparent: proactively at `SESSION_MAX_AGE_HOURS`, and on any upstream 401 the gateway renews the session and replays the request before the browser can see it — see [ADR 0002](docs/adr/0002-session-renewal-replay.md) (supersedes [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md)).
+* `/login` is a manual trigger only: the webapp never requests it, because a dead session makes the SPA route to the login screen client-side instead of issuing a request.
+* Renewal does not revoke the previous Mattermost session server-side — the gateway simply stops replaying it, and the old session expires by its own ~7-day TTL.
 * Mattermost rate-limits login (5 rps / burst 10); the gateway backs off and retries (up to 3 attempts).
 * `MATTERMOST_PROVISION_TOKEN` is a **system-admin** personal access token — keep `/etc/mattermost-ssl-auth.env` at mode 600, root-only.
 * `ALLOW_PROVISION=false` is read-only mode: existing users can still authenticate, unknown certificates are never created.

@@ -236,6 +236,7 @@ for src in \
   usr/local/openresty/nginx/lua/mattermost_ssl_auth.lua \
   usr/local/openresty/nginx/lua/mattermost_location_default.lua \
   usr/local/openresty/nginx/lua/mattermost_location_login.lua \
+  usr/local/openresty/nginx/lua/mattermost_session_filter.lua \
   etc/systemd/system/mattermost-ssl-auth.service
 do
   dest="/${src}"
