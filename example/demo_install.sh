@@ -277,10 +277,17 @@ systemctl enable --now mattermost-ssl-auth
 openresty -t
 
 echo "  smoke test: present the admin demo certificate"
-curl -fsS --cacert "$SCRIPT_DIR/ca/root-ca.crt" \
-  --cert "$SCRIPT_DIR/certs/flo.crt" --key "$SCRIPT_DIR/certs/flo.key" \
-  --resolve "${MM_FQDN}:443:127.0.0.1" "https://${MM_FQDN}/api/v4/users/me" \
-  | python3 -m json.tool
+# The demo client certs only exist under $SCRIPT_DIR when this run built
+# the PKI; a re-run on an existing deployment (certs already in
+# /etc/ssl/private) skips the build and has no local client certs.
+if [ -f "$SCRIPT_DIR/certs/flo.crt" ]; then
+  curl -fsS --cacert "$SCRIPT_DIR/ca/root-ca.crt" \
+    --cert "$SCRIPT_DIR/certs/flo.crt" --key "$SCRIPT_DIR/certs/flo.key" \
+    --resolve "${MM_FQDN}:443:127.0.0.1" "https://${MM_FQDN}/api/v4/users/me" \
+    | python3 -m json.tool
+else
+  echo "  (skipped: no demo client certs in $SCRIPT_DIR — verify $MM_FQDN with a trusted client certificate)"
+fi
 
 echo
 echo "Demo installation done."
