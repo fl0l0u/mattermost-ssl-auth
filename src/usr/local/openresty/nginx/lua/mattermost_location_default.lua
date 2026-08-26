@@ -17,7 +17,7 @@ local function inject_session(cookies, token)
     -- it turns the stored cookie string into the Set-Cookie headers that
     -- populate the browser's jar.
     ngx.ctx.mmssl = { cookie_string = cookies, token = token }
-    return ssl:rewrite_request(cookies, token, cookies:match("MMCSRF=([^=; ]+)"))
+    return ssl:rewrite_request(cookies, token, cookies:match("MMCSRF=([^; ]+)"))
 end
 
 -- 2. HEALTH CHECK (throttled liveness, access phase): a stored session

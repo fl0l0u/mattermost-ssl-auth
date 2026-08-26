@@ -20,7 +20,7 @@ if type(request_cookies) == "table" then
     request_cookies = table.concat(request_cookies, "; ")
 end
 if request_cookies then
-    for k, v in string.gmatch(request_cookies, "([^=; ]+)=([^=; ]+)") do
+    for k, v in string.gmatch(request_cookies, "([^=; ]+)=([^; ]+)") do
         if k == "MMAUTHTOKEN" or k == "MMUSERID" or k == "MMCSRF" then
             stale[#stale + 1] = k .. "=" .. v
         end
