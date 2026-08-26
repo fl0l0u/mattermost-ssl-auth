@@ -19,8 +19,6 @@ local LOCK_WAIT_MS = 15000
 local LOCK_POLL_MS = 200
 local HTTP_TIMEOUT_MS = 5000
 local LOGIN_MAX_ATTEMPTS = 3
-local REPLAY_CONNECT_TIMEOUT_MS = 10000
-local REPLAY_TRANSFER_TIMEOUT_MS = 60000
 
 local DEFAULT_UPSTREAM = "http://127.0.0.1:8065"
 local DEFAULT_REDIS_URI = "unix:/run/redis/redis-server.sock"
@@ -943,90 +941,6 @@ function MattermostSslAuth:renew_for_401()
         return nil, err
     end
     return true
-end
-
--- Sends the client's request to the configured upstream for the 401
--- intercept: a plain replay with renewed headers. `uri` is the request
--- target as received (path plus query string), `method` uppercase,
--- `body` may be nil. Timeouts: 10 s connect, 60 s send/receive. Returns
--- status, headers, body, or nil, nil, nil, err on a transport failure.
-function MattermostSslAuth:replay_request(new_headers, method, uri, body)
-    local c = http:new()
-    c:set_timeouts(REPLAY_CONNECT_TIMEOUT_MS, REPLAY_TRANSFER_TIMEOUT_MS, REPLAY_TRANSFER_TIMEOUT_MS)
-    local ok, err = c:connect(self.upstream_host, self.upstream_port)
-    if not ok then
-        return nil, nil, nil, "replay connect failed: " .. tostring(err)
-    end
-    local opts = {
-        method = method,
-        path = uri,
-        headers = new_headers,
-    }
-    if body and body ~= "" then
-        opts.body = body
-    end
-    local res, req_err = c:request(opts)
-    if not res then
-        return nil, nil, nil, "replay request failed: " .. tostring(req_err)
-    end
-    local response_body = res:read_body()
-    return res.status, res.headers, response_body
-end
-
--- The full outbound header set for a replay: rewrite_request() re-applied
--- first with the freshly stored session (the access phase ran with the
--- old values), then the current request's headers, plus the fixed
--- overrides the config's proxy_set_header lines apply. Host is dropped
--- too: the replay client sets it from the connect target. Returns the
--- header table (lowercase keys), or nil + err when there is no stored
--- session to rewrite from.
---
--- The websocket location reuses this snapshot: upgrade and
--- sec-websocket-* are deliberately kept (the handshake replay needs
--- them); connection framing is re-negotiated by the fresh connection,
--- and the replay client recomputes Content-Length from the body it
--- sends.
-function MattermostSslAuth:snapshot_outbound_headers()
-    local cookies = self:get_cookies()
-    if not cookies then
-        return nil, "no stored session to rewrite"
-    end
-    local token = self:get_token()
-    self:rewrite_request(cookies, token, cookies:match("MMCSRF=([^=; ]+)"))
-
-    local headers = ngx.req.get_headers(true)
-    local remote_addr = ngx.var.remote_addr
-    headers["x-real-ip"] = remote_addr
-    headers["x-forwarded-for"] = remote_addr
-    headers["x-forwarded-proto"] = "https"
-    headers["x-forwarded-ssl"] = "on"
-    for _, name in ipairs({ "connection", "proxy-connection", "keep-alive",
-                            "transfer-encoding", "content-length", "host" }) do
-        headers[name] = nil
-    end
-    return headers
-end
-
--- The current request's body, for a replay: browsers send small XHR
--- bodies that nginx keeps in memory; the file read covers the rare
--- buffered-to-disk one. Returns the body string, or nil when the
--- request has none.
-function MattermostSslAuth:read_request_body()
-    ngx.req.read_body()
-    local body = ngx.req.get_body_data()
-    if not body then
-        local file = ngx.req.get_body_file()
-        if not file then
-            return nil
-        end
-        local f = io.open(file, "rb")
-        if not f then
-            return nil
-        end
-        body = f:read("*a")
-        f:close()
-    end
-    return body
 end
 
 -- Rebuilds the Cookie header of the proxied request: stored values win per
