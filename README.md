@@ -29,7 +29,7 @@ The browser presents a client certificate over TLS; the gateway maps that certif
 2. The gateway parses the certificate DN: email attribute → username, name attribute → display name, `OU=Admins` → system admin.
 3. If no session is stored for that user yet, the gateway resolves a password (provisioning the user via the admin API when `ALLOW_PROVISION=true`), logs in against `/api/v4/users/login`, and stores the resulting session cookies and Bearer token in Redis.
 4. Every forwarded request gets `Cookie`, `X-CSRF-Token` and `Authorization` overwritten from the stored session, so the browser never carries Mattermost session material.
-5. The stored session is renewed transparently, two ways ([ADR 0002](docs/adr/0002-session-renewal-replay.md)): **proactively**, it is re-logged in on a later request once it is older than `SESSION_MAX_AGE_HOURS` (the old session stays valid, so the switchover is seamless); **reactively**, an upstream 401 on `/api/v4/*` is intercepted — the gateway renews the session and replays the original request, so the browser never sees the 401 and never client-side-logs-out (swapped responses carry `X-Session-Renewed: 1`). The webapp itself never requests `/login` — it routes to the login screen client-side — so `/login` is a manual trigger only: a navigation there drops and re-logs in the session, then 302s back to the `Referer` (same-origin only, else `/`).
+5. The stored session is renewed two ways ([ADR 0002](docs/adr/0002-session-renewal-replay.md)): **proactively**, it is re-logged in on a later request once it is older than `SESSION_MAX_AGE_HOURS` (the old session stays valid, so the switchover is seamless); **reactively**, on an upstream 401 for `/api/v4/*` the gateway re-establishes the session in the log phase, right after that response is sent — the browser may have seen that one 401 (the SPA may briefly show its login screen); recovery is automatic on the next request / page refresh / full-page `/login`. The webapp itself never requests `/login` — it routes to the login screen client-side — so `/login` is a manual trigger only: a navigation there drops and re-logs in the session, then 302s back to the `Referer` (same-origin only, else `/`).
 6. WebSocket traffic on `/api/v4/websocket` gets the same session injection during the HTTP Upgrade request.
 7. The gateway is fail-closed: a missing or invalid client certificate is refused (400), and any failure in Redis, Mattermost, or the provision token aborts the request with an error — nothing is proxied unauthenticated.
 
@@ -40,7 +40,7 @@ The browser presents a client certificate over TLS; the gateway maps that certif
 * `OU=Admins` certificates are provisioned as `system_admin`
 * New users are added to the default team automatically
 * Session state in Redis — survives gateway restarts
-* Transparent session renewal: proactive re-login at `SESSION_MAX_AGE_HOURS`, plus a 401 intercept that renews and replays the request so the browser never sees the 401 ([ADR 0002](docs/adr/0002-session-renewal-replay.md))
+* Session renewal: proactive re-login at `SESSION_MAX_AGE_HOURS` (invisible), plus reactive log-phase renewal on an upstream 401 — one 401 may be visible after a sudden session death, and the next request gets the fresh session ([ADR 0002](docs/adr/0002-session-renewal-replay.md))
 * `/login` remains a manual renewal trigger (the webapp never requests it — client-side routing)
 * WebSocket support (`/api/v4/websocket`)
 * Audit access log: every request records the presenting certificate (verify status, fingerprint, DN); sensitive query params (`token`, `code`, `invite_id`) are redacted
@@ -96,7 +96,7 @@ Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the
 
 ## Caveats
 
-* Session renewal is transparent: proactively at `SESSION_MAX_AGE_HOURS`, and on any upstream 401 the gateway renews the session and replays the request before the browser can see it — see [ADR 0002](docs/adr/0002-session-renewal-replay.md) (supersedes [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md)).
+* Session renewal is proactive at `SESSION_MAX_AGE_HOURS` (invisible); after a sudden session invalidation one upstream 401 may be visible to the browser — the gateway re-establishes the session in the log phase right after that response, so the next request, refresh, or full-page `/login` succeeds, with at most a refresh needed — see [ADR 0002](docs/adr/0002-session-renewal-replay.md) (supersedes [ADR 0001](docs/adr/0001-login-only-session-store-refresh.md)).
 * `/login` is a manual trigger only: the webapp never requests it, because a dead session makes the SPA route to the login screen client-side instead of issuing a request.
 * Renewal does not revoke the previous Mattermost session server-side — the gateway simply stops replaying it, and the old session expires by its own ~7-day TTL.
 * Mattermost rate-limits login (5 rps / burst 10); the gateway backs off and retries (up to 3 attempts).
