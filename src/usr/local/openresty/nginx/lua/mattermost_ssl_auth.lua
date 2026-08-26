@@ -157,6 +157,15 @@ local function json_headers(token)
     }
 end
 
+-- Like json_headers() minus Content-Type: for bodyless GETs (the liveness
+-- probe), where a Content-Type would describe a body that is not sent.
+local function auth_headers(token)
+    return {
+        ["Authorization"] = "Bearer " .. token,
+        ["Accept"]        = "application/json",
+    }
+end
+
 function MattermostSslAuth:new(fqdn)
     local upstream_host, upstream_port, upstream_err =
         parse_upstream(env_or("MATTERMOST_UPSTREAM", DEFAULT_UPSTREAM))
@@ -456,8 +465,8 @@ end
 -- Re-verify that we still hold the session lock. A critical section that
 -- outlives the lock TTL loses it: another request can then re-acquire the
 -- lock and commit its own state. Call this right before committing state
--- (store_password) so a stale holder aborts instead of overwriting a newer
--- holder's work.
+-- (store_password, the establish_session store) so a stale holder aborts
+-- instead of overwriting a newer holder's work.
 function MattermostSslAuth:check_lock()
     if not self.lock_owner then
         self:fail(ngx.HTTP_SERVICE_UNAVAILABLE, "session lock expired, retry")
@@ -772,14 +781,19 @@ end
 
 -- Resolves a password that is known to log in: validates the cached one, or
 -- repairs/provisions the account until a fresh, verified password exists.
--- Owns the per-email session lock for the duration (the caller re-logs in
--- with the returned password and stores the resulting session).
+-- Runs under the per-email session lock: this call acquires it when not
+-- held, and releases it only when this call acquired it. A renewal caller
+-- enters already holding the lock and keeps it through the login and
+-- stores that follow (establish_session re-checks ownership before
+-- committing); the caller releases it after.
 function MattermostSslAuth:resolve_password()
     -- Fast path: a session already exists, so no locking or provisioning is
     -- needed; the hook re-logs in with the cached password.
     if self:get_cookies() then
         return self:get_password()
     end
+
+    local acquired = self.lock_owner == nil
 
     if not self:acquire_lock(self.email) then
         if not self:wait_for_session(self.email) then
@@ -796,7 +810,9 @@ function MattermostSslAuth:resolve_password()
     end
 
     local password = self:resolve_password_locked()
-    self:release_lock()
+    if acquired then
+        self:release_lock()
+    end
     return password
 end
 
@@ -852,11 +868,14 @@ end
 
 -- The shared login critical section, used by both hooks and by session
 -- renewal: drop the stale session, resolve a password that is known to
--- log in (the agent owns the per-email session lock for the duration),
--- log in with the given stale cookies/CSRF (nil for a clean login), and
--- store the fresh session including its age marker. Returns the stored
--- (cookies, token). Every failure exits the request with the hook
--- conventions (400 on login, 5xx on infrastructure).
+-- log in, log in with the given stale cookies/CSRF (nil for a clean
+-- login), and store the fresh session including its age marker. When the
+-- caller holds the per-email session lock (the renewal path), ownership
+-- is re-checked right before the fresh session is committed, so a
+-- critical section that outlives the lock TTL aborts instead of
+-- overwriting a peer's state. Returns the stored (cookies, token). Every
+-- failure exits the request with the hook conventions (400 on login, 5xx
+-- on infrastructure).
 function MattermostSslAuth:establish_session(login_cookies, login_csrf)
     self:del_session()
     local password = self:resolve_password()
@@ -872,6 +891,14 @@ function MattermostSslAuth:establish_session(login_cookies, login_csrf)
     if not cookies then
         -- The second http_login return value doubles as the error message.
         self:fail(ngx.HTTP_BAD_REQUEST, token)
+    end
+    -- Re-verify lock ownership before committing: the renewal caller still
+    -- holds the lock here, so a section that outlived the 60 s TTL aborts
+    -- (503; degraded under soft_fail) instead of overwriting a peer's
+    -- state. The cold paths already released the lock in
+    -- resolve_password, so when no lock is held the check is a no-op.
+    if self.lock_owner then
+        self:check_lock()
     end
     self:store_cookies(cookies)
     self:store_token(token)
@@ -929,16 +956,21 @@ function MattermostSslAuth:check_session_health()
         return
     end
 
-    -- 2. Throttle: at most one check per user per interval. A missing
+    -- 2. Throttle: at most one check per user per interval. add() is
+    --    atomic, so concurrent first-checks cannot both pass. A missing
     --    shared dict (not declared in nginx.conf) skips the throttle but
-    --    not the check.
+    --    not the check; a full one logs and continues unthrottled.
     local throttle = ngx.shared.mmssl_sessions
     local throttle_key = "chk:" .. self.email
     if throttle then
-        if throttle:get(throttle_key) then
+        local added, err = throttle:add(throttle_key, 1, self.session_check_interval_s)
+        if added == false then
+            -- Key exists: a check already ran within the interval.
             return
         end
-        throttle:set(throttle_key, 1, self.session_check_interval_s)
+        if not added then
+            ngx.log(ngx.WARN, "[lua] session-check throttle set failed; continuing without throttle")
+        end
     end
 
     -- 3. Age first: an over-age (or age-unknown) session is renewed
@@ -952,7 +984,7 @@ function MattermostSslAuth:check_session_health()
     local t_probe
     if not stale then
         local res, err = self:api_request(
-            "GET", "/api/v4/users/me", nil, json_headers(token), PROBE_TIMEOUT_MS)
+            "GET", "/api/v4/users/me", nil, auth_headers(token), PROBE_TIMEOUT_MS)
         if not res then
             ngx.log(ngx.WARN, "[lua] session health probe failed: " .. tostring(err))
             return
@@ -996,7 +1028,9 @@ function MattermostSslAuth:check_session_health()
         -- that renewed in the meantime republished first and wins.
         if cookies and not self:get_cookies() then
             self:store_cookies(cookies)
-            self:store_token(snapshot_token)
+            if snapshot_token then
+                self:store_token(snapshot_token)
+            end
             if snapshot_since then
                 self:store_since(snapshot_since)
             end
@@ -1013,7 +1047,7 @@ end
 -- the login.
 function MattermostSslAuth:rewrite_request(cookies_string, token, mmcsrf)
     local stored = {}
-    for k, v in string.gmatch(cookies_string, "([^=; ]+)=([^=; ]+)") do
+    for k, v in string.gmatch(cookies_string, "([^=; ]+)=([^; ]+)") do
         stored[k] = v
     end
 
@@ -1025,7 +1059,7 @@ function MattermostSslAuth:rewrite_request(cookies_string, token, mmcsrf)
         request_cookies = table.concat(request_cookies, "; ")
     end
     if request_cookies then
-        for k, v in string.gmatch(request_cookies, "([^=; ]+)=([^=; ]+)") do
+        for k, v in string.gmatch(request_cookies, "([^=; ]+)=([^; ]+)") do
             cookie_header = cookie_header .. k .. "=" .. (stored[k] or v) .. ";"
             stored[k] = nil
         end

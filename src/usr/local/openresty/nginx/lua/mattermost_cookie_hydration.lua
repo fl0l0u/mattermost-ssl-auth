@@ -6,8 +6,9 @@ https://github.com/fl0l0u
 -- cosockets — phase-legal; ADR 0002). The webapp decides "logged in" from
 -- MMUSERID in the browser's jar, but the access hook only rewrites the
 -- outbound wire request, so a fresh browser lands on the login form. This
--- filter replaces the upstream's Set-Cookie headers (same values) with
--- the stored session's, carrying the jar's attributes.
+-- filter replaces the upstream's Set-Cookie headers with the stored
+-- session's cookies (the stored values win, which may differ from what the
+-- upstream just set), carrying the jar's attributes.
 local s = ngx.ctx.mmssl
 if not s or not s.cookie_string then
     return
@@ -29,7 +30,7 @@ if ngx.var.https == "on" then
 end
 
 local set_cookie = {}
-for k, v in string.gmatch(s.cookie_string, "([^=; ]+)=([^=; ]+)") do
+for k, v in string.gmatch(s.cookie_string, "([^=; ]+)=([^; ]+)") do
     local attrs = (k == "MMAUTHTOKEN") and attrs_http or attrs_plain
     set_cookie[#set_cookie + 1] = k .. "=" .. v .. attrs
 end
