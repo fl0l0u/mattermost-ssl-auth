@@ -11,17 +11,7 @@ if test_dn == nil and ngx.var.ssl_client_verify ~= "SUCCESS" then
 end
 
 -- 2. RENEW CACHED SESSION
-ssl:del_session()
-
--- 2.1. FETCH PASSWORD (the agent owns the per-email lock and exits on
--- every failure, so a returned password is known to log in)
-local password = ssl:resolve_password()
-if not password then
-    return ssl:fail(ngx.HTTP_INTERNAL_SERVER_ERROR,
-        "no password resolved for session renewal")
-end
-
--- 2.2. Rebuild the stale cookie string from the incoming request, keeping
+-- 2.1. Rebuild the stale cookie string from the incoming request, keeping
 -- only the session cookies
 local stale = {}
 local request_cookies = ngx.req.get_headers()["Cookie"]
@@ -44,16 +34,11 @@ if not stale_csrf then
     stale_csrf = ""
 end
 
--- 2.3. AUTH USER (http_login returns cookies + token on success, and
--- nil + error message on failure — the second value doubles as the error)
-local cookies, token = ssl:http_login(password, table.concat(stale, "; "), stale_csrf)
-if not cookies then
-    return ssl:fail(ngx.HTTP_BAD_REQUEST, token)
-end
-
--- 2.4. CACHE SESSION
-ssl:store_cookies(cookies)
-ssl:store_token(token)
+-- 2.2. The shared critical section drops the stale session, resolves a
+-- password known to log in (the agent owns the per-email lock and exits
+-- on every failure), re-logs in with the stale cookies, and caches the
+-- fresh session
+ssl:establish_session(table.concat(stale, "; "), stale_csrf)
 
 -- 3. REDIRECT BACK
 -- Honor the Referer only when it is same-origin: a relative path starting

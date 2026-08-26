@@ -19,6 +19,8 @@ local LOCK_WAIT_MS = 15000
 local LOCK_POLL_MS = 200
 local HTTP_TIMEOUT_MS = 5000
 local LOGIN_MAX_ATTEMPTS = 3
+local REPLAY_CONNECT_TIMEOUT_MS = 10000
+local REPLAY_TRANSFER_TIMEOUT_MS = 60000
 
 local DEFAULT_UPSTREAM = "http://127.0.0.1:8065"
 local DEFAULT_REDIS_URI = "unix:/run/redis/redis-server.sock"
@@ -170,10 +172,26 @@ function MattermostSslAuth:new(fqdn)
         self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR, "failed to connect to redis: " .. err)
     end
 
+    -- The Origin the login is presented from. Empty (the default) keeps
+    -- the historical behavior of synthesizing "https://<host>"; set it to
+    -- the Mattermost SiteURL when the browser-facing URL differs from the
+    -- Host header the request arrives with.
+    local site_url = env_or("MATTERMOST_SITE_URL", "")
+
+    local max_age_raw = env_or("SESSION_MAX_AGE_HOURS", "20")
+    local max_age_hours = tonumber(max_age_raw)
+    if not max_age_hours or max_age_hours < 0 then
+        self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR,
+            "SESSION_MAX_AGE_HOURS must be a non-negative number of hours: " .. max_age_raw)
+    end
+
     local this = {
         upstream_host       = upstream_host,
         upstream_port       = upstream_port,
         redisc              = red,
+        site_url            = site_url,
+        session_max_age_s   = max_age_hours * 3600,
+        soft_fail           = false,
         provision_token     = env_or("MATTERMOST_PROVISION_TOKEN", ""),
         allow_provision     = env_bool("ALLOW_PROVISION", false),
         default_team_id     = env_or("MM_DEFAULT_TEAM_ID", ""),
@@ -263,6 +281,13 @@ function MattermostSslAuth:get_password()
     return self:redis_get(session_key(self.email, "password"))
 end
 
+-- The stored session's age marker (epoch seconds), or nil when absent or
+-- unparseable — a session with no readable marker counts as age-unknown.
+function MattermostSslAuth:get_since()
+    local value = self:redis_get(session_key(self.email, "since"))
+    return value and tonumber(value)
+end
+
 -- Redis replies are normalized at this boundary: ngx.null, nil and "" all
 -- mean "no value", so the rest of the code only ever sees nil or a string.
 function MattermostSslAuth:redis_get(key)
@@ -293,6 +318,11 @@ function MattermostSslAuth:store_token(token)
     self:redis_set(session_key(self.email, "token"), token)
 end
 
+-- Epoch seconds (string) when this session was established.
+function MattermostSslAuth:store_since(t)
+    self:redis_set(session_key(self.email, "since"), tostring(t or ngx.now()))
+end
+
 -- The password is only valid once the account has been provisioned or
 -- rotated under the session lock, so storing it requires still holding that
 -- lock: check_lock() aborts a holder whose lock expired mid-section.
@@ -301,12 +331,13 @@ function MattermostSslAuth:store_password(password)
     self:redis_set(session_key(self.email, "password"), password)
 end
 
--- Drops the session (cookies + token) but keeps the cached password, so the
--- next request re-logs in instead of re-provisioning.
+-- Drops the session (cookies + token + age marker) but keeps the cached
+-- password, so the next request re-logs in instead of re-provisioning.
 function MattermostSslAuth:del_session()
     local ok, err = self.redisc:del(
         session_key(self.email, "cookies"),
-        session_key(self.email, "token")
+        session_key(self.email, "token"),
+        session_key(self.email, "since")
     )
     if not ok then
         self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR, "redis DEL failed: " .. tostring(err))
@@ -315,7 +346,19 @@ end
 
 -- Serializes the first login/provisioning per email. A concurrent request
 -- for the same user waits instead of double-provisioning.
+-- Re-entrant: a renewal holds this lock and runs a critical section that
+-- acquires it again (resolve_password); without this a holder would
+-- SET NX its own key, lose, and wait itself out into a 504.
 function MattermostSslAuth:acquire_lock(email)
+    if self.lock_owner then
+        local value, err = self.redisc:get(lock_key(email))
+        if err then
+            self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR, "failed to verify session lock: " .. tostring(err))
+        end
+        if value == self.lock_owner then
+            return true
+        end
+    end
     local owner = new_lock_owner()
     local ok, err = self.redisc:set(lock_key(email), owner, "PX", LOCK_TTL_MS, "NX")
     if err then
@@ -604,11 +647,19 @@ end
 -- the Bearer token, or nil plus an error message.
 function MattermostSslAuth:http_login(password, cookies, csrf)
     local host = ngx.var.http_host
+    -- MATTERMOST_SITE_URL lets the login be presented from the URL the
+    -- browser sees; empty (default) synthesizes the Origin from Host.
+    local origin
+    if self.site_url ~= "" then
+        origin = self.site_url
+    else
+        origin = "https://" .. host
+    end
     local headers = {
         ["Host"]              = host,
         ["Content-Type"]      = "application/json",
         ["Accept"]            = "application/json",
-        ["Origin"]            = "https://" .. host,
+        ["Origin"]            = origin,
         ["X-Requested-With"]  = "XMLHttpRequest",
         ["X-Forwarded-Proto"] = "https",
         ["X-Forwarded-Ssl"]   = "on",
@@ -758,6 +809,226 @@ function MattermostSslAuth:repair_password(missing_user_msg)
     return password
 end
 
+-- The shared login critical section, used by both hooks and by session
+-- renewal: drop the stale session, resolve a password that is known to
+-- log in (the agent owns the per-email session lock for the duration),
+-- log in with the given stale cookies/CSRF (nil for a clean login), and
+-- store the fresh session including its age marker. Returns the stored
+-- (cookies, token). Every failure exits the request with the hook
+-- conventions (400 on login, 5xx on infrastructure).
+function MattermostSslAuth:establish_session(login_cookies, login_csrf)
+    self:del_session()
+    local password = self:resolve_password()
+    if not password then
+        -- A peer published the session while we waited; use it.
+        local stored = self:get_cookies()
+        if not stored then
+            self:fail(ngx.HTTP_INTERNAL_SERVER_ERROR, "no password resolved for session")
+        end
+        return stored, self:get_token()
+    end
+    local cookies, token = self:http_login(password, login_cookies, login_csrf)
+    if not cookies then
+        -- The second http_login return value doubles as the error message.
+        self:fail(ngx.HTTP_BAD_REQUEST, token)
+    end
+    self:store_cookies(cookies)
+    self:store_token(token)
+    self:store_since()
+    return cookies, token
+end
+
+-- Runs the renewal critical section so that a failure degrades instead
+-- of terminating the request: for its duration fail() raises a catchable
+-- Lua error (soft_fail) that this pcall swallows, so a broken renewal
+-- still lets the request proceed (serve the stored session, or pass a
+-- 401 through). Returns true + (cookies, token), or false + err.
+function MattermostSslAuth:try_establish(login_cookies, login_csrf)
+    self.soft_fail = true
+    local ok, first, second = pcall(self.establish_session, self, login_cookies, login_csrf)
+    self.soft_fail = false
+    if not ok then
+        return false, first
+    end
+    return true, first, second
+end
+
+-- A session is fresh while its age marker is within
+-- SESSION_MAX_AGE_HOURS. A missing or unparseable marker counts as stale:
+-- an age-unknown session is renewed rather than served.
+function MattermostSslAuth:is_session_fresh()
+    local since = self:get_since()
+    return since ~= nil and ngx.now() - since <= self.session_max_age_s
+end
+
+-- Proactive session renewal: re-login before the stored session can die,
+-- so the SPA never has to. Returns one of:
+--   "miss"     no stored session; the caller does the normal cold path.
+--   "fresh"    the stored session is within the renewal age; serve it.
+--   "renewed"  a fresh session was just established; serve the stored
+--              values.
+--   "degraded" renewal failed: the pre-renewal session is restored and
+--              served as-is (the 401 intercept gets another chance on
+--              the next request).
+function MattermostSslAuth:maybe_renew_session()
+    local cookies = self:get_cookies()
+    if not cookies then
+        return "miss"
+    end
+    if self:is_session_fresh() then
+        return "fresh"
+    end
+
+    -- Stale or age-unknown. Serialize the renewal per email: only the
+    -- lock holder re-logs in, the others wait and reuse the result.
+    if not self:acquire_lock(self.email) then
+        if not self:wait_for_session(self.email) then
+            self:fail(ngx.HTTP_GATEWAY_TIMEOUT, "timed out waiting for session renewal")
+        end
+    end
+    -- Re-check under the lock: a peer may have renewed while we waited.
+    if self:is_session_fresh() then
+        self:release_lock()
+        return "fresh"
+    end
+
+    -- Snapshot what is about to be replaced, for the degraded path.
+    local token = self:get_token()
+    local since = self:get_since()
+    local ok, err = self:try_establish()
+    self:release_lock()
+    if not ok then
+        ngx.log(ngx.WARN,
+            "[lua] session renewal failed, serving existing session: " .. tostring(err))
+        -- The critical section deleted the stale session before failing;
+        -- put it back so the caller still has something to serve. A peer
+        -- that renewed in the meantime republished first and wins.
+        if not self:get_cookies() then
+            self:store_cookies(cookies)
+            self:store_token(token)
+            if since then
+                self:store_since(since)
+            end
+        end
+        return "degraded"
+    end
+    return "renewed"
+end
+
+-- Reactive renewal for a request whose upstream response was just 401:
+-- the stored session is dead, re-establish it. A peer that renewed
+-- after our 401 (age marker >= the 401 moment) makes a replay with the
+-- stored session valid, which is the fast skip. Returns true (renewed,
+-- or already fresh by a peer), or nil + err — never terminates the
+-- request: the 401 must pass through to the client unchanged.
+function MattermostSslAuth:renew_for_401()
+    local t401 = ngx.now()
+    local since = self:get_since()
+    if since and since >= t401 then
+        return true
+    end
+    if not self:acquire_lock(self.email) then
+        if not self:wait_for_session(self.email) then
+            return nil, "timed out waiting for session renewal"
+        end
+    end
+    since = self:get_since()
+    if since and since >= t401 then
+        self:release_lock()
+        return true
+    end
+    local ok, err = self:try_establish()
+    self:release_lock()
+    if not ok then
+        return nil, err
+    end
+    return true
+end
+
+-- Sends the client's request to the configured upstream for the 401
+-- intercept: a plain replay with renewed headers. `uri` is the request
+-- target as received (path plus query string), `method` uppercase,
+-- `body` may be nil. Timeouts: 10 s connect, 60 s send/receive. Returns
+-- status, headers, body, or nil, nil, nil, err on a transport failure.
+function MattermostSslAuth:replay_request(new_headers, method, uri, body)
+    local c = http:new()
+    c:set_timeouts(REPLAY_CONNECT_TIMEOUT_MS, REPLAY_TRANSFER_TIMEOUT_MS, REPLAY_TRANSFER_TIMEOUT_MS)
+    local ok, err = c:connect(self.upstream_host, self.upstream_port)
+    if not ok then
+        return nil, nil, nil, "replay connect failed: " .. tostring(err)
+    end
+    local opts = {
+        method = method,
+        path = uri,
+        headers = new_headers,
+    }
+    if body and body ~= "" then
+        opts.body = body
+    end
+    local res, req_err = c:request(opts)
+    if not res then
+        return nil, nil, nil, "replay request failed: " .. tostring(req_err)
+    end
+    local response_body = res:read_body()
+    return res.status, res.headers, response_body
+end
+
+-- The full outbound header set for a replay: rewrite_request() re-applied
+-- first with the freshly stored session (the access phase ran with the
+-- old values), then the current request's headers, plus the fixed
+-- overrides the config's proxy_set_header lines apply. Host is dropped
+-- too: the replay client sets it from the connect target. Returns the
+-- header table (lowercase keys), or nil + err when there is no stored
+-- session to rewrite from.
+--
+-- The websocket location reuses this snapshot: upgrade and
+-- sec-websocket-* are deliberately kept (the handshake replay needs
+-- them); connection framing is re-negotiated by the fresh connection,
+-- and the replay client recomputes Content-Length from the body it
+-- sends.
+function MattermostSslAuth:snapshot_outbound_headers()
+    local cookies = self:get_cookies()
+    if not cookies then
+        return nil, "no stored session to rewrite"
+    end
+    local token = self:get_token()
+    self:rewrite_request(cookies, token, cookies:match("MMCSRF=([^=; ]+)"))
+
+    local headers = ngx.req.get_headers(true)
+    local remote_addr = ngx.var.remote_addr
+    headers["x-real-ip"] = remote_addr
+    headers["x-forwarded-for"] = remote_addr
+    headers["x-forwarded-proto"] = "https"
+    headers["x-forwarded-ssl"] = "on"
+    for _, name in ipairs({ "connection", "proxy-connection", "keep-alive",
+                            "transfer-encoding", "content-length", "host" }) do
+        headers[name] = nil
+    end
+    return headers
+end
+
+-- The current request's body, for a replay: browsers send small XHR
+-- bodies that nginx keeps in memory; the file read covers the rare
+-- buffered-to-disk one. Returns the body string, or nil when the
+-- request has none.
+function MattermostSslAuth:read_request_body()
+    ngx.req.read_body()
+    local body = ngx.req.get_body_data()
+    if not body then
+        local file = ngx.req.get_body_file()
+        if not file then
+            return nil
+        end
+        local f = io.open(file, "rb")
+        if not f then
+            return nil
+        end
+        body = f:read("*a")
+        f:close()
+    end
+    return body
+end
+
 -- Rebuilds the Cookie header of the proxied request: stored values win per
 -- name, other client pairs are forwarded, and stored pairs the client did
 -- not send are appended. X-CSRF-Token and Authorization are always
@@ -812,6 +1083,13 @@ function MattermostSslAuth:fail(status, msg)
     -- burn its 15 s wait window and time out with 504.
     self:release_lock()
     ngx.log(ngx.ERR, "[lua] ", msg)
+    if self.soft_fail then
+        -- A renewal path runs under pcall (try_establish): raise a
+        -- catchable Lua error instead of terminating the request, so the
+        -- failed renewal degrades (serve the stored session, let a 401
+        -- pass through) instead of killing it.
+        error("[lua] " .. tostring(msg or "unknown error"), 0)
+    end
     -- ngx.status must be set before ngx.say: the first say starts the
     -- response with whatever status is currently in effect (200 by
     -- default), so a say-then-exit order would serve every failure as 200.

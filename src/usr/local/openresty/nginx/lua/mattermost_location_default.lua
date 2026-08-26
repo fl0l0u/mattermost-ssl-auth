@@ -16,34 +16,17 @@ local function inject_session(cookies, token)
     return ssl:rewrite_request(cookies, token, cookies:match("MMCSRF=([^=; ]+)"))
 end
 
--- 2. FETCH SESSION
-local cookies = ssl:get_cookies()
-if cookies then
-    -- 2.1. CACHED SESSION: forward it as-is
-    return inject_session(cookies, ssl:get_token())
+-- 2. FETCH SESSION (with proactive renewal)
+-- "fresh", "renewed", and "degraded" all mean the stored session is
+-- usable: fresh is within the renewal age, renewed was just re-logged
+-- in, degraded kept its pre-renewal session after a failed renewal.
+local state = ssl:maybe_renew_session()
+if state ~= "miss" then
+    return inject_session(ssl:get_cookies(), ssl:get_token())
 end
 
--- 2.2. CREATE NEW SESSION: the agent owns the per-email lock and exits on
--- every failure, so a returned password is known to log in
-local password = ssl:resolve_password()
-if not password then
-    -- Another worker published the session while we waited
-    local fresh = ssl:get_cookies()
-    if not fresh then
-        return ssl:fail(ngx.HTTP_INTERNAL_SERVER_ERROR,
-            "no password resolved for session")
-    end
-    return inject_session(fresh, ssl:get_token())
-end
-
--- 2.3. AUTH USER (http_login returns cookies + token on success, and
--- nil + error message on failure — the second value doubles as the error)
-local session_cookies, token = ssl:http_login(password, nil, nil)
-if not session_cookies then
-    return ssl:fail(ngx.HTTP_BAD_REQUEST, token)
-end
-
--- 2.4. CACHE SESSION
-ssl:store_cookies(session_cookies)
-ssl:store_token(token)
-return inject_session(session_cookies, token)
+-- 2.1. CREATE NEW SESSION (cold path): the agent owns the per-email
+-- lock and exits on every failure, so a returned session is stored
+-- and fresh
+local cookies, token = ssl:establish_session(nil, nil)
+return inject_session(cookies, token)
