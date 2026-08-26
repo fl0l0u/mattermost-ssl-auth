@@ -91,11 +91,12 @@ One renewal mechanism, plus one filter:
 * **WebSocket Origin policy (Mattermost 11.10.1, probed
   experimentally):** the WS upgrade's `Origin` must equal the SiteURL —
   scheme+host case-insensitive, **port compared literally** (an
-  explicit `:443` is rejected); an empty Origin is allowed. The
-  loopback test ingress can therefore never carry browser WebSockets
-  (a browser's Origin always carries its port); production (page
-  origin == SiteURL) works — verified end-to-end through the proxy
-  (101 + hello).
+  explicit `:443` is rejected); an empty Origin is allowed. The proxy
+  therefore normalizes the forwarded Origin to the SiteURL — a no-op in
+  production (page origin == SiteURL) and what makes browser WebSockets
+  work on the loopback test ingress too, where the browser's explicit
+  port would otherwise be rejected; verified end-to-end through the
+  proxy (101 + hello).
 * **Browser-verified** (Playwright, reference VM): fresh-browser cold
   start boots logged in (0×401 out of 47 requests); a server-side
   session revoke
