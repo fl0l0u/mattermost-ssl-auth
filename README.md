@@ -6,6 +6,8 @@ Client-certificate (x509) single sign-on for [Mattermost](https://mattermost.com
 
 The browser presents a client certificate over TLS; the gateway maps that certificate to a Mattermost user, logs the user in server-side, and proxies the session. Users never see — or type — a password, and no Mattermost session cookie ever reaches the browser.
 
+![The Mattermost web app behind the proxy](images/mattermost-ssl-auth.png)
+
 ## How it works
 
 ```
