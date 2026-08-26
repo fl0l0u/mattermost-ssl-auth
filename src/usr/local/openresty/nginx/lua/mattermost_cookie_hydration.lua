@@ -13,17 +13,24 @@ if not s or not s.cookie_string then
     return
 end
 
--- Path=/ so the jar receives the cookies on every path; Max-Age 30 days
--- covers Mattermost's session lifetime; SameSite=Lax is the webapp's
--- default. Secure is appended only when the gateway is served over TLS —
--- the loopback http test ingress must hydrate the jar too.
-local attrs = "; Path=/; HttpOnly; Max-Age=2592000; SameSite=Lax"
+-- Attributes mirror Mattermost's own login Set-Cookie (11.10.1):
+-- MMAUTHTOKEN is HttpOnly, MMUSERID and MMCSRF are NOT — the webapp reads
+-- them via document.cookie (boot-route gate and X-CSRF-Token source), so
+-- HttpOnly on those two makes the SPA boot unauthenticated. Path=/ so the
+-- jar receives the cookies on every path; Max-Age 30 days covers
+-- Mattermost's session lifetime; SameSite=Lax is the webapp's default.
+-- Secure is appended only when the gateway is served over TLS — the
+-- loopback http test ingress must hydrate the jar too.
+local attrs_plain = "; Path=/; Max-Age=2592000; SameSite=Lax"
+local attrs_http = "; Path=/; HttpOnly; Max-Age=2592000; SameSite=Lax"
 if ngx.var.https == "on" then
-    attrs = attrs .. "; Secure"
+    attrs_plain = attrs_plain .. "; Secure"
+    attrs_http = attrs_http .. "; Secure"
 end
 
 local set_cookie = {}
 for k, v in string.gmatch(s.cookie_string, "([^=; ]+)=([^=; ]+)") do
+    local attrs = (k == "MMAUTHTOKEN") and attrs_http or attrs_plain
     set_cookie[#set_cookie + 1] = k .. "=" .. v .. attrs
 end
 if #set_cookie > 0 then
