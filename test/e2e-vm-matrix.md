@@ -98,6 +98,16 @@ since the conf tree moved to `/etc/mattermost-ssl-auth/`):
   `journalctl -u mattermost-ssl-auth` carries only systemd + nginx
   stderr lines. Tail the file instead.
 
+### 2026-08-27 — probe 14: use the `New, ...` line as the handshake-complete indicator
+
+The SSL-Session block's `Protocol:` line is racy under the `echo |`
+EOF style for TLS 1.3: the server's session ticket arrives
+asynchronously after the handshake, and `s_client` can print the
+SSL-Session block before it lands, so `Protocol:` does not reliably
+reflect the negotiated version. Judge each handshake by the
+`New, <ver>, Cipher is <cipher>` line (printed at handshake
+completion) instead.
+
 ## Pass criteria
 
 All 16 probes must match their expected result exactly. Any deviation is an

@@ -40,6 +40,8 @@ case "$1" in
     chown -R "$WORKER_USER" /var/lib/openresty
 
     missing=""
+    env_incomplete=0
+    cert_paths_missing=0
 
     # The conf hardcodes the certificate paths, so a passing config
     # test proves the TLS material is in place.
@@ -49,6 +51,7 @@ case "$1" in
   - the nginx config test failed (error above)."
       case "$conf_test_err" in
         */etc/ssl/private/*|*certificate*)
+          cert_paths_missing=1
           missing="$missing
     Provide the certificates at the paths the conf expects —
     example/build_certs.sh builds all three:
@@ -60,16 +63,19 @@ case "$1" in
     fi
 
     if [ ! -f "$ENV" ]; then
+      env_incomplete=1
       missing="$missing
   - $ENV is missing (restore the .dpkg-dist copy dpkg saved, or copy
     src/etc/mattermost-ssl-auth.env.example from the repo)."
     else
       if grep -qF '<system-admin personal access token>' "$ENV"; then
+        env_incomplete=1
         missing="$missing
   - $ENV still has the placeholder value for
     MATTERMOST_PROVISION_TOKEN."
       fi
       if grep -qF '<default team id>' "$ENV"; then
+        env_incomplete=1
         missing="$missing
   - $ENV still has the placeholder value for MM_DEFAULT_TEAM_ID."
       fi
@@ -77,7 +83,23 @@ case "$1" in
 
     if [ -n "$missing" ]; then
       echo "mattermost-ssl-auth: configuration incomplete, service NOT started:$missing" >&2
-      echo "mattermost-ssl-auth: fill in $ENV and the certificate paths, then:" >&2
+      # Summarize exactly what is missing — never hint at certificate
+      # paths when only the env is incomplete (or vice versa).
+      fix=""
+      if [ "$env_incomplete" -eq 1 ]; then
+        fix="fill in $ENV"
+      fi
+      if [ "$cert_paths_missing" -eq 1 ]; then
+        if [ -n "$fix" ]; then
+          fix="$fix and the certificate paths"
+        else
+          fix="provide the certificates (paths above)"
+        fi
+      fi
+      if [ -z "$fix" ]; then
+        fix="fix the nginx config (error above)"
+      fi
+      echo "mattermost-ssl-auth: $fix, then:" >&2
       echo "  $NGINX -t -c $CONF && systemctl restart mattermost-ssl-auth" >&2
       exit 0
     fi

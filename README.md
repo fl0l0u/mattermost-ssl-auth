@@ -76,6 +76,7 @@ The package **vendors** [lua-resty-http v0.17.1](https://github.com/ledgetech/lu
 
 Fresh-machine prerequisites: the package `Depends:` on `openresty` and `redis-server` (apt pulls them in) and `Recommends:` `mattermost`. On top of that:
 
+* **Stock `openresty` service**: a fresh `apt install openresty` leaves the stock `openresty` unit enabled and active, listening on `:80` — this package never touches it. If you don't use it: `sudo systemctl disable --now openresty`.
 * **Mattermost** 11.x reachable at `MATTERMOST_UPSTREAM` (default `http://127.0.0.1:8065`), with a system-admin personal access token and a default team.
 * **Certificates** at `/etc/ssl/private/mattermost.crt`, `/etc/ssl/private/mattermost.key` and `/etc/ssl/private/client-ca.crt` — [`example/build_certs.sh`](example/build_certs.sh) builds all of them. These can be in place **before or after** the install: `postinst` runs the nginx config test and checks the env file, and only when both pass enables the service for boot (`systemctl enable`) and starts it (fresh install) or restarts it (upgrade); otherwise it prints exactly what is missing and exits before enabling or (re)starting: on a fresh install the service is left **not started and not enabled** for boot, whereas on an upgrade a previously running service **keeps running** (postinst exits 0 without stopping it).
 * **Env file**: fill in `/etc/mattermost-ssl-auth.env` (the package ships the example values as a conffile; at minimum replace the placeholders for `MATTERMOST_PROVISION_TOKEN` and `MM_DEFAULT_TEAM_ID`), then `sudo systemctl enable mattermost-ssl-auth && sudo systemctl restart mattermost-ssl-auth` — the placeholder path never enabled the unit, so a bare `restart` would leave it running but not boot-enabled.
@@ -94,7 +95,7 @@ All settings live in `/etc/mattermost-ssl-auth.env` (template: [`src/etc/matterm
 |---|---|---|
 | `MATTERMOST_UPSTREAM` | `http://127.0.0.1:8065` | Base URL of the Mattermost instance behind the proxy (http only; TLS is terminated by the gateway) |
 | `MATTERMOST_SITE_URL` | `https://mattermost.example.test` | Public URL of Mattermost (SiteURL); the Origin the login is presented from — empty (unset) synthesizes `https://<Host>` |
-| `REDIS_URI` | `unix:/run/redis/redis-server.sock` | Redis for the session store — `unix:<path>`, bare `host:port`, or `redis://host:port` |
+| `REDIS_URI` | `redis://127.0.0.1:6379` | Redis for the session store — `unix:<path>`, bare `host:port`, or `redis://host:port`. Stock Ubuntu 24.04's distro unix socket is `700 redis:redis`, unreachable by the `nobody` workers (500 on the first certified request) — use TCP unless you fix the socket permissions |
 | `MATTERMOST_PROVISION_TOKEN` | `<system-admin personal access token>` | System-admin personal access token used to create/repair Mattermost users |
 | `ALLOW_PROVISION` | `true` | `false` disables automatic user creation (auth only) |
 | `MM_DEFAULT_TEAM_ID` | `<default team id>` | Team ID new users are added to during provisioning |
@@ -111,8 +112,8 @@ The example PKI (`example/build_certs.sh`) issues:
 
 | Certificate | DN | Provisions |
 |---|---|---|
-| `certs/flo.*` | `/emailAddress=flolou@simple.org/CN=Flo Lou/O=Simple Inc/OU=Admins/C=FR/ST=State/L=City/DC=simple/DC=org` | user `flolou`, display name "Flo Lou", **system admin**, added to the default team |
-| `certs/aze.*` | `/emailAddress=azerty@simple.org/CN=Azé Rtÿiôµ/O=Simple Inc/OU=Users/C=FR/ST=State/L=City/DC=simple/DC=org` | user `azerty`, display name "Azé Rtÿiôµ" (non-ASCII on purpose) |
+| `certs/flo.*` | `/O=Example Org/OU=Admins/CN=flolou/emailAddress=flo@example.test` | user `flo`, display name "flolou", **system admin** (`OU=Admins`), added to the default team |
+| `certs/aze.*` | `/O=Example Org/OU=Users/CN=Azerty/emailAddress=aze@example.test` | user `aze`, display name "Azerty" (`OU=Users`) |
 
 Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the username is its local part when `USERNAME_FROM_EMAIL=true`; the `CERT_NAME_FIELD` value is split on the first space into first/last name; a certificate whose `OU` equals `CERT_ADMIN_OU` is granted `system_admin`.
 

@@ -96,6 +96,12 @@ su -s /bin/bash postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname
 
 echo "4. Mattermost configuration"
 MM_CFG=/opt/mattermost/config/config.json
+# Mattermost 11.10.1's deb postinst only ENABLES the service on a fresh
+# install — it never starts it — and config.json is written on first
+# start. On a truly fresh box the backup below would have nothing to
+# copy and abort under set -e, so seed it from the bundled defaults
+# (Mattermost uses the file as-is on first start).
+[ -f "$MM_CFG" ] || cp -p /opt/mattermost/config/config.defaults.json "$MM_CFG"
 [ -f "${MM_CFG}.bak" ] || cp -p "$MM_CFG" "${MM_CFG}.bak"
 MM_DSN="postgres://${MM_DB_USER}:${MM_DB_PASS}@127.0.0.1:5432/${MM_DB_NAME}?sslmode=disable"
 python3 - "$MM_CFG" "$MM_SITE_URL" "$MM_DSN" <<'EOF'
