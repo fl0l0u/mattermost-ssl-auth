@@ -91,12 +91,18 @@ One renewal mechanism, plus one filter:
 * **WebSocket Origin policy (Mattermost 11.10.1, probed
   experimentally):** the WS upgrade's `Origin` must equal the SiteURL —
   scheme+host case-insensitive, **port compared literally** (an
-  explicit `:443` is rejected); an empty Origin is allowed. The proxy
-  therefore normalizes the forwarded Origin to the SiteURL — a no-op in
-  production (page origin == SiteURL) and what makes browser WebSockets
-  work on the loopback test ingress too, where the browser's explicit
-  port would otherwise be rejected; verified end-to-end through the
-  proxy (101 + hello).
+  explicit `:443` is rejected); an empty Origin is allowed. The access
+  hook therefore normalizes the forwarded Origin to the SiteURL
+  (`MATTERMOST_SITE_URL`) **only when the Origin's host matches the
+  SiteURL's host** (any or absent port): same-origin pages are
+  untouched (identical value), same-host non-default ports get the port
+  fixed (what makes browser WebSockets work on the loopback test and
+  demo ingresses, where the browser's explicit port would otherwise be
+  rejected), and other hosts are left untouched so Mattermost rejects
+  them with 403 — the cross-origin drive-by defense (attacker page +
+  victim's auto-presented client cert/cookie opening a readable WS
+  stream) is preserved; verified end-to-end through the proxy (101 +
+  hello on the rewritten port, 403 on an attacker-host Origin).
 * **Browser-verified** (Playwright, reference VM): fresh-browser cold
   start boots logged in (0×401 out of 47 requests); a server-side
   session revoke

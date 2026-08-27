@@ -123,5 +123,22 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   0×401/0×5xx.
 - WebSocket: production path verified end-to-end through the proxy
   (101 + hello with a matching Origin); the loopback test ingress
-  cannot carry browser WS (Mattermost compares the Origin port
-  literally — see ADR 0002).
+  could not carry browser WS (Mattermost compares the Origin port
+  literally — see ADR 0002) — superseded 2026-08-27 by same-host-only
+  normalization (entry below).
+
+## 2026-08-27 — same-host-only WS Origin normalization
+
+- `mattermost_location_default.lua` now normalizes the WebSocket
+  `Origin` to `MATTERMOST_SITE_URL` in the access hook (hook shared by
+  every `location = /api/v4/websocket`), **only when the Origin's host
+  matches the SiteURL's host** (any or absent port) — replacing the
+  per-location `proxy_set_header Origin` lines, removed from
+  `nginx.conf` (443 + 18443 in the repo conf; 443, 18443 plus the
+  VM-only demo blocks 18444/18445 on this VM).
+- Effect: the loopback/test/demo ingresses now carry browser
+  WebSockets (port-only rewrite), while cross-origin WS upgrades
+  (attacker-host Origin) pass through untouched and are rejected by
+  Mattermost with 403. Backups:
+  `/root/nginx.conf.pre-samehost.bak`,
+  `/root/mattermost_location_default.lua.pre-samehost.bak`.

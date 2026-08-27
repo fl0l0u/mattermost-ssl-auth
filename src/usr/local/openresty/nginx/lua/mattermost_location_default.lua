@@ -12,6 +12,44 @@ if test_dn == nil and ngx.var.ssl_client_verify ~= "SUCCESS" then
     return ssl:fail(ngx.HTTP_FORBIDDEN, "no valid client certificate")
 end
 
+-- 1.3. WEBSOCKET ORIGIN NORMALIZATION (same-host only)
+-- Why: Mattermost compares the WS upgrade's Origin to the SiteURL with the
+-- port literal, while a browser on a non-default port always sends the
+-- explicit port — so such handshakes would be rejected.
+-- Security constraint: rewrite ONLY when the incoming Origin's host equals
+-- the SiteURL's host (any or absent port). A different host (a cross-origin
+-- drive-by: attacker page + the victim's auto-presented cert/cookie) is
+-- passed through untouched, so Mattermost still rejects it with 403.
+-- Source of truth: MATTERMOST_SITE_URL (declared via `env` in nginx.conf).
+local function origin_host(url)
+    -- host = the authority of an https?:// URL; after the host only a bare
+    -- :port (or nothing) may follow — a path, userinfo or stray space
+    -- rejects the shape. Note: this OpenResty's LuaJIT 2.1.ROLLING pattern
+    -- engine never matches an optional capture group ((...)?), so the tail
+    -- is captured unconditionally and validated separately.
+    local host, rest = url:match("^https?://([^:/?#]+)(.*)$")
+    if not host then
+        return nil
+    end
+    if rest ~= "" and rest:match("^:%d+$") == nil then
+        return nil
+    end
+    return host
+end
+local function same_host(a, b)
+    local ha = origin_host(a)
+    local hb = origin_host(b)
+    return ha ~= nil and hb ~= nil and ha:lower() == hb:lower()
+end
+local site_url = os.getenv("MATTERMOST_SITE_URL")
+if ngx.var.uri == "/api/v4/websocket"
+    and site_url
+    and ngx.var.http_origin
+    and same_host(site_url, ngx.var.http_origin) then
+    ngx.req.clear_header("Origin")
+    ngx.req.set_header("Origin", site_url)
+end
+
 local function inject_session(cookies, token)
     -- Stash the session for the cookie-hydration header filter (pure Lua):
     -- it turns the stored cookie string into the Set-Cookie headers that
