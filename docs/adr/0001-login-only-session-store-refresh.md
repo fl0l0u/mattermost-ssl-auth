@@ -1,6 +1,6 @@
 # ADR 0001: Refresh the session store only at first login and /login renewal
 
-> **Superseded by [ADR 0002](0002-session-renewal-replay.md)** — the webapp never requests /login (client-side routing); session liveness is now checked in the access phase.
+> **Superseded by [ADR 0002](0002-session-renewal-replay.md)** — the webapp never requests /login (client-side routing); session liveness is now checked in the access phase. Its "the browser never holds session material" model was replaced by the ADR 0002 cookie-jar hydration: on `/` the gateway itself serves the stored session cookies to the browser (the webapp reads `MMUSERID` from `document.cookie`), and the browser always holds the stored values.
 
 - Status: superseded by ADR 0002
 - Date: 2026-08-25

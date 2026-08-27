@@ -345,10 +345,43 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   provisioned users `flo`/`aze`); D3 — README `REDIS_URI` shows the
   TCP URI plus the stock-socket caveat (`700 redis:redis`,
   unreachable by the `nobody` workers); D4 — README: a fresh
-  `apt install openresty` leaves the stock `openresty` unit
-  enabled+active on `:80`, which the package never touches
-  (`sudo systemctl disable --now openresty` if unused); D5 — matrix
-  probe 14 note (the s_client SSL-Session `Protocol:` line is racy
-  under `echo |` EOF for TLS 1.3 — the session ticket arrives
-  asynchronously; use the `New, <ver>, Cipher is ...` line as the
-  handshake-complete indicator).
+   `apt install openresty` leaves the stock `openresty` unit
+   enabled+active on `:80`, which the package never touches
+   (`sudo systemctl disable --now openresty` if unused); D5 — matrix
+   probe 14 note (the s_client SSL-Session `Protocol:` line is racy
+   under `echo |` EOF for TLS 1.3 — the session ticket arrives
+   asynchronously; use the `New, <ver>, Cipher is ...` line as the
+   handshake-complete indicator).
+
+## 2026-08-27 — docs: Mermaid diagram; cookie-flow claims corrected (0.1.4)
+
+- User decision: KEEP the per-name Cookie merge in
+  `rewrite_request` (`mattermost_ssl_auth.lua` lines 1048–1087:
+  stored value wins per name, other host cookies forwarded verbatim,
+  `X-CSRF-Token` + `Authorization` always replaced/cleared from the
+  stored session) — semantics inherited from the original
+  gitlab-ssl-auth. A full cookie-stop (drop every client cookie) was
+  assessed as ~1 line, but REJECTED: it would lose self-adaptation to
+  any future non-session host cookie Mattermost might set. No
+  payload change in this round (no conf/lua/test touched).
+- README architecture diagram: ASCII → Mermaid (`flowchart LR`),
+  edge labels corrected to the true semantics (per-name merge on the
+  request direction; ADR 0002 jar hydration on the response
+  direction).
+- Cookie-flow claims corrected (README + `packaging/debian/control`
+  Description): the browser-direction claims ("no Mattermost session
+  cookie ever reaches the browser", "the browser never carries
+  Mattermost session material", "no Mattermost cookie ever crosses
+  the wire") were false vs ADR 0002 — the gateway itself serves the
+  stored session cookies into the browser's jar (`Set-Cookie` on `/`);
+  the browser always holds the stored values, and access is granted
+  by the client certificate. Request direction now documented as
+  per-name merge with verbatim pass-through of other host cookies
+  (none exist in the verified Mattermost 11.x flow — the host's jar
+  can only contain cookies Mattermost set, which are the three
+  session cookies, set only in login responses the browser never
+  issues). ADR 0001 header gained the explicit note that its
+  browser-holds-nothing model was replaced by ADR 0002 hydration.
+- The 0.1.4 .deb was rebuilt so the artifact matches the tagged
+  source; only the control Description changed (package metadata, not
+  payload, not a conffile — no VM redeploy needed).

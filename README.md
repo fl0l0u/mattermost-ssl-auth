@@ -4,35 +4,30 @@
 
 Client-certificate (x509) single sign-on for [Mattermost](https://mattermost.com) behind an OpenResty reverse proxy. A port of [fl0l0u/gitlab-ssl-auth](https://github.com/fl0l0u/gitlab-ssl-auth) (Apache-2.0) from GitLab to Mattermost.
 
-The browser presents a client certificate over TLS; the gateway maps that certificate to a Mattermost user, logs the user in server-side, and proxies the session. Users never see — or type — a password, and no Mattermost session cookie ever reaches the browser.
+The browser presents a client certificate over TLS; the gateway maps that certificate to a Mattermost user, logs the user in server-side, and replays the stored session on every request. Users never see — or type — a password, and access is granted by the client certificate, not by possession of cookies. The browser's cookie jar is kept in sync **by the gateway itself** — it serves the stored session cookies as `Set-Cookie` on `/` ([ADR 0002](docs/adr/0002-session-renewal-replay.md)) — so the browser holds the three session cookies, but always the stored values.
 
 ![The Mattermost web app behind the proxy](images/mattermost-ssl-auth.png)
 
 ## How it works
 
-```
- +---------+  TLS + client cert   +--------------------------+  HTTP, loopback   +-------------+
- | browser | -------------------> | OpenResty :443           | ----------------> | Mattermost  |
- |         | <-------------------- | gateway (Lua)            | <----------------- | 127.0.0.1  |
- +---------+  proxied response;   +----------+---------------+  session replayed  | :8065      |
-            no Mattermost cookies          |                                    +-------------+
-            ever reach the browser         | per-user session:
-                                           | cookies + token + password
-                                           v
-                                        +---------+          create / repair user,
-                                        |  Redis  | <-------> team join, rotate
-                                        +---------+          password (admin API,
-                                           x509auth:            system-admin PAT)
-                                           <email>:{password,
-                                            cookies, token}
+```mermaid
+flowchart LR
+    B["browser"]
+    G["OpenResty :443 gateway (Lua)"]
+    M["Mattermost 127.0.0.1:8065"]
+    R["Redis x509auth:&lt;email&gt;:{password, cookies, token}"]
+    B -->|"TLS + client certificate"| G
+    G -->|"HTTP (loopback); stored session replayed — 3 session cookies overwritten, X-CSRF-Token + Authorization always replaced"| M
+    G -->|"proxied response; on / the gateway hydrates the jar (Set-Cookie = stored session cookies, ADR 0002)"| B
+    G <-->|"per-user session: cookies + token + password; create/repair user, team join, rotate password (admin API + system-admin PAT)"| R
 ```
 
 1. The browser opens `https://mattermost.example.test` presenting a client certificate signed by the trusted client CA (`ssl_verify_client on` — requests without a valid certificate are refused at the TLS layer).
 2. The gateway parses the certificate DN: email attribute → username, name attribute → display name, `OU=Admins` → system admin.
 3. If no session is stored for that user yet, the gateway resolves a password (provisioning the user via the admin API when `ALLOW_PROVISION=true`), logs in against `/api/v4/users/login`, and stores the resulting session cookies and Bearer token in Redis.
-4. Every forwarded request gets `Cookie`, `X-CSRF-Token` and `Authorization` overwritten from the stored session, so the browser never carries Mattermost session material.
+4. Every forwarded request carries the stored server-side session: the three Mattermost session cookies (`MMAUTHTOKEN`, `MMUSERID`, `MMCSRF`) are overwritten with the stored values per name — a browser-held value for those names never reaches upstream — `X-CSRF-Token` and `Authorization` are always replaced from the stored session, and any other host cookie is forwarded verbatim (in the verified Mattermost 11.x flow there are none: the host's cookie jar can only contain cookies Mattermost set for that host, and it sets only the three session cookies, only in login responses, which the browser never issues).
 5. The stored session is kept alive by an **access-phase liveness check** ([ADR 0002](docs/adr/0002-session-renewal-replay.md)): throttled per user to one check per `SESSION_CHECK_INTERVAL_SECONDS` (60 s), it first compares the session's age against `SESSION_MAX_AGE_HOURS` (20 h) and, if still fresh, probes it with a `GET /api/v4/users/me`. An over-age or 401-probed session is re-logged in **while the request is still in flight**, under the per-user Redis lock; the check never fails the request (a failed renewal restores the previous session and the next request retries). The webapp itself never requests `/login` — it routes to the login screen client-side — so `/login` is a manual trigger only: a navigation there drops and re-logs in the session, then 302s back to the `Referer` (same-origin only, else `/`).
-6. A pure-Lua header filter **hydrates the browser's cookie jar**: on `location /` the gateway sends the stored `MMAUTHTOKEN`, `MMUSERID` and `MMCSRF` as `Set-Cookie` (attributes mirror Mattermost's own login response — `HttpOnly` on `MMAUTHTOKEN` only, `Secure` only over TLS), so a fresh browser boots straight into the logged-in app even though no Mattermost cookie ever crosses the wire.
+6. A pure-Lua header filter **hydrates the browser's cookie jar** ([ADR 0002](docs/adr/0002-session-renewal-replay.md)): on `location /` the gateway replaces the upstream's `Set-Cookie` headers with the stored `MMAUTHTOKEN`, `MMUSERID` and `MMCSRF` (attributes mirror Mattermost's own login response — `HttpOnly` on `MMAUTHTOKEN` only, `Secure` only over TLS). The webapp decides "logged in" from `MMUSERID` in `document.cookie`, so the jar deliberately holds the session cookies — always the stored values, served by the gateway itself. That is why a fresh browser boots straight into the logged-in app: every request is replayed with the stored session, and the gateway serves the session cookies into the jar.
 7. WebSocket traffic on `/api/v4/websocket` gets the same session injection during the HTTP Upgrade request.
 8. The gateway is fail-closed: a missing or invalid client certificate is refused (400), and any failure in Redis, Mattermost, or the provision token aborts the request with an error — nothing is proxied unauthenticated.
 

@@ -10,8 +10,9 @@ Description: client-certificate auth reverse proxy for Mattermost
  Client-certificate (x509) single sign-on for Mattermost behind an
  OpenResty reverse proxy: the gateway maps the browser's client
  certificate to a Mattermost user, logs the user in server-side via
- the admin API, and proxies the session, so no Mattermost session
- cookie ever reaches the browser.
+ the admin API, and replays the stored session on every request; the
+ browser's cookie jar is kept in sync by the gateway itself, and
+ access is granted by the client certificate, not by cookies.
  .
  OpenResty + Lua gateway; users are provisioned through the
  Mattermost admin API and per-user session state (cookies + token)
