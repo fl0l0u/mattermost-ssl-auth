@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build .deb
+        # Requires dpkg-deb (present on the Ubuntu runner). Reads VERSION
+        # from the repo; the deb filename embeds it.
+        run: bash packaging/build_deb.sh
+
+      - name: Publish release
+        # On a tag push the release is created from the tag; on
+        # workflow_dispatch from the commit. Fails the build on error.
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          body: |
+            Client-certificate (x509) single sign-on for Mattermost behind an OpenResty reverse proxy.
+
+            Install (Debian/Ubuntu):
+
+            ```
+            sudo dpkg -i mattermost-ssl-auth_<version>_all.deb
+            ```
+
+            Prerequisites — OpenResty, Redis, Mattermost 11.x, client CA — see README.md.
