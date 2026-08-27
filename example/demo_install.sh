@@ -8,7 +8,7 @@
 #   4. First user via API (local mode makes it the system admin),
 #      provisioning PAT, default team
 #   5. PKI from build_certs.sh -> /etc/ssl/private/{mattermost.crt,mattermost.key,client-ca.crt}
-#   6. lua-resty-http v0.17.1 -> /usr/local/openresty/nginx/lua/resty/
+#   6. vendored lua-resty-http v0.17.1 (repo-pinned) -> /usr/local/openresty/nginx/lua/resty/
 #   7. repo src/ -> /usr/local + /etc/systemd/system (existing files backed up)
 #   8. /etc/mattermost-ssl-auth.env (root:600)
 #   9. proxy state dirs (logs/pid/temp) + worker ownership
@@ -220,13 +220,17 @@ else
   chmod 644 /etc/ssl/private/client-ca.crt
 fi
 
-echo "7. Lua dependency: lua-resty-http v0.17.1"
-# v0.17.1 repo layout: lib/resty/{http,http_connect,http_headers}.lua
+echo "7. Install vendored lua-resty-http v0.17.1 (repo-pinned)"
+# v0.17.1 repo layout: lib/resty/{http,http_connect,http_headers}.lua —
+# vendored in the repo (src/usr/local/openresty/nginx/lua/resty/), so no
+# network fetch is needed.
 install -d -m 755 /usr/local/openresty/nginx/lua/resty
-for f in http.lua http_connect.lua http_headers.lua; do
-  curl -fsSL "https://raw.githubusercontent.com/ledgetech/lua-resty-http/v0.17.1/lib/resty/${f}" \
-    -o "/usr/local/openresty/nginx/lua/resty/${f}"
-done
+install -m 644 -o root -g root \
+  "$REPO_ROOT/src/usr/local/openresty/nginx/lua/resty/http.lua" \
+  "$REPO_ROOT/src/usr/local/openresty/nginx/lua/resty/http_connect.lua" \
+  "$REPO_ROOT/src/usr/local/openresty/nginx/lua/resty/http_headers.lua" \
+  "$REPO_ROOT/src/usr/local/openresty/nginx/lua/resty/LICENSE" \
+  /usr/local/openresty/nginx/lua/resty/
 
 echo "8. Deploy gateway files (existing files backed up)"
 # The stock openresty service is superseded by mattermost-ssl-auth.service.

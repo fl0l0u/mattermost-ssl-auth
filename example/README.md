@@ -18,7 +18,7 @@ Installs and wires up everything on a clean box:
 * Mattermost: loopback listen (`127.0.0.1:8065`), `SiteURL=https://mattermost.example.test`, local mode, SQL DSN
 * First user via the API (local mode makes it the system admin), provisioning PAT, default team
 * PKI (via `build_certs.sh`) → `/etc/ssl/private/{mattermost.crt,mattermost.key,client-ca.crt}`
-* lua-resty-http v0.17.1 → `/usr/local/openresty/nginx/lua/resty/`
+* vendored lua-resty-http v0.17.1 (repo-pinned) → `/usr/local/openresty/nginx/lua/resty/`
 * gateway files from `src/` (existing files backed up) + `/etc/mattermost-ssl-auth.env` (root:600)
 * `mattermost-ssl-auth` service started, `openresty -t` + certificate smoke test
 

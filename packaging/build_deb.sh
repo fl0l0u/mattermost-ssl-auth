@@ -28,6 +28,7 @@ mkdir -p \
   "$pkg_dir/DEBIAN" \
   "$pkg_dir/usr/local/openresty/nginx/conf/includes" \
   "$pkg_dir/usr/local/openresty/nginx/lua" \
+  "$pkg_dir/usr/local/openresty/nginx/lua/resty" \
   "$pkg_dir/usr/local/openresty/nginx/test" \
   "$pkg_dir/etc/systemd/system" \
   "$pkg_dir/usr/share/doc/$package"
@@ -50,6 +51,16 @@ install -m 644 \
   src/usr/local/openresty/nginx/lua/mattermost_cookie_hydration.lua \
   src/usr/local/openresty/nginx/lua/mattermost_origin.lua \
   "$pkg_dir/usr/local/openresty/nginx/lua/"
+
+# Vendored lua-resty-http v0.17.1 — a top-level runtime require of
+# mattermost_ssl_auth.lua, shipped here so the .deb has no external
+# fetch (see LICENSE, "Vendored third-party components").
+install -m 644 \
+  src/usr/local/openresty/nginx/lua/resty/http.lua \
+  src/usr/local/openresty/nginx/lua/resty/http_connect.lua \
+  src/usr/local/openresty/nginx/lua/resty/http_headers.lua \
+  src/usr/local/openresty/nginx/lua/resty/LICENSE \
+  "$pkg_dir/usr/local/openresty/nginx/lua/resty/"
 
 install -m 644 test/origin_test.lua "$pkg_dir/usr/local/openresty/nginx/test/"
 

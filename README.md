@@ -72,6 +72,8 @@ sudo dpkg -i dist/mattermost-ssl-auth_<version>_all.deb
 # or: sudo apt ./dist/mattermost-ssl-auth_<version>_all.deb
 ```
 
+The package **vendors** [lua-resty-http v0.17.1](https://github.com/ledgetech/lua-resty-http) — a top-level runtime `require` of the gateway — into `/usr/local/openresty/nginx/lua/resty/` (MIT; license text in `LICENSE`), so no external fetch is needed at install time.
+
 Fresh-machine prerequisites: the package `Depends:` on `openresty` and `redis-server` (apt pulls them in) and `Recommends:` `mattermost`. On top of that:
 
 * **Mattermost** 11.x reachable at `MATTERMOST_UPSTREAM` (default `http://127.0.0.1:8065`), with a system-admin personal access token and a default team.
