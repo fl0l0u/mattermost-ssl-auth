@@ -264,3 +264,24 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   18444 (pinned), aze on 18443 (X-Test-DN) and 18445 (pinned); WS
   101 on the 443 production path. Backup:
   `/root/nginx.conf.pre-glob.bak`.
+
+## 2026-08-27 — .deb packaging rework (0.1.1 `952f91c`, 0.1.2 `dcc3afa`)
+
+- **0.1.1 rework (`952f91c`)**: the packaged conf tree moved from
+  `/usr/local/openresty/nginx/conf/` to `/etc/mattermost-ssl-auth/`
+  (nginx.conf + the 3 includes) — the openresty apt package owns
+  `/usr/local/openresty/nginx/conf/`, and a stock `dpkg -i` of 0.1.0
+  failed on that overwrite (verified on the reference VM).
+- Conffiles (5): the env file + all 4 conf files — operator edits
+  survive install/upgrade, `dpkg -r` keeps them, `dpkg --purge`
+  removes them.
+- Postinst creates the runtime/log/state dirs before its `nginx -t`
+  gate — the unit's `RuntimeDirectory` is absent while the service is
+  stopped, which deadlocked fresh installs.
+- Unit shipped at `/lib/systemd/system/mattermost-ssl-auth.service`.
+- **0.1.2 (`dcc3afa`)**: prerm stops the service on `remove`/`purge`
+  (not on `upgrade` — zero-downtime in-place upgrade); postinst
+  enables the service for boot (`systemctl enable`, user policy) then
+  restarts, only when the config test + placeholder gate pass.
+- The VM demo/test server includes (18444/18445/18443) follow the
+  same glob, now under `/etc/mattermost-ssl-auth/includes/`.
