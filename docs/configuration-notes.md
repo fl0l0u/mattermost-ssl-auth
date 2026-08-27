@@ -142,3 +142,32 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   Mattermost with 403. Backups:
   `/root/nginx.conf.pre-samehost.bak`,
   `/root/mattermost_location_default.lua.pre-samehost.bak`.
+
+## 2026-08-27 — nginx.conf split into includes (DRY, zero behavior change)
+
+- `nginx.conf` is now main context + http infra only; the server blocks
+  and their location bodies moved verbatim to
+  `/usr/local/openresty/nginx/conf/includes/` — 5 files:
+  `location-ws.conf`, `location-login.conf`, `location-root.conf`
+  (shared by every server) and `server-443.conf`,
+  `server-test-18443.conf` (the former inline blocks; where the location
+  bodies were, they now carry three `include` lines). Absolute include
+  paths. Zero behavior change: each new server file re-expands
+  byte-for-byte to its original inline block.
+- On this VM the demo servers became `includes/server-demo-18444.conf`
+  / `includes/server-demo-18445.conf` (VM-only, not in the repo) — each
+  keeps listen/`server_name`/ssl_*/pinned `set $mmssl_test_dn`/
+  `client_max_body_size` and includes the shared location bodies (the
+  inlined copies were verified byte-identical before replacing). The
+  VM's `nginx.conf` differs from the repo's only by the two demo
+  include lines. Backups: `/root/nginx.conf.pre-dry.bak`,
+  `/root/nginx-conf.pre-dry.bak.tgz` (whole conf dir).
+- `example/demo_install.sh` deploy-list fixes (pre-existing bugs):
+  removed `mattermost_session_filter.lua` (file no longer in the repo —
+  a fresh install aborted on it under `set -euo pipefail`) and added
+  `mattermost_cookie_hydration.lua` (referenced by the conf's
+  `header_filter_by_lua_file` but never installed).
+- The installer backs up and overwrites the files it deploys but does
+  NOT remove stale files on re-deploy: e.g. the now-unreferenced
+  `/usr/local/openresty/nginx/lua/mattermost_session_filter.lua` left on
+  this VM stays on disk (harmless — nothing includes it).

@@ -109,13 +109,13 @@ Mapping rules: the `CERT_EMAIL_FIELD` value (lowercased) is the login email; the
 * `MATTERMOST_PROVISION_TOKEN` is a **system-admin** personal access token — keep `/etc/mattermost-ssl-auth.env` at mode 600, root-only.
 * `ALLOW_PROVISION=false` is read-only mode: existing users can still authenticate, unknown certificates are never created.
 * Username collisions (two certificates whose email local-parts match but whose full emails differ) fail closed with a clear error — the second certificate is not provisioned.
-* One FQDN per gateway — the server name is baked into `nginx.conf`.
+* One FQDN per gateway — the server name is baked into the conf tree (`nginx.conf` + `includes/`).
 * `ssl_verify_client on` is required; the gateway refuses any request without a valid client certificate.
 * Tested end-to-end against Mattermost 11.10.1 (API behavior source-checked); other 11.x versions should work, but verify your version.
 
 ## Testing
 
-`nginx.conf` ships a loopback-only test ingress on `127.0.0.1:18443` (development only) that runs the full proxy pipeline over plain HTTP: instead of a TLS client certificate, it takes the already-unpacked DN from the `X-Test-DN` header, emulating what the real reverse proxy does.
+The conf tree ships a loopback-only test ingress on `127.0.0.1:18443` (development only) that runs the full proxy pipeline over plain HTTP: instead of a TLS client certificate, it takes the already-unpacked DN from the `X-Test-DN` header, emulating what the real reverse proxy does.
 
 ```bash
 curl -H 'Host: mattermost.example.test' \
