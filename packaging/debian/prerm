@@ -3,7 +3,11 @@
 set -e
 
 case "$1" in
-  remove)
+  # Stop before dpkg deletes the package's files: `dpkg --remove` gets
+  # `remove`, a direct `dpkg --purge` gets `purge` without a prior
+  # remove — either way the unit file goes, and a still-running master
+  # would be orphaned and unmanageable.
+  remove|purge)
     systemctl stop mattermost-ssl-auth || true
     ;;
   # upgrade / deconfigure: the service keeps running; the unit file is

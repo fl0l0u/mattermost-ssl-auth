@@ -4,6 +4,7 @@ set -e
 
 CONF=/etc/mattermost-ssl-auth/nginx.conf
 ENV=/etc/mattermost-ssl-auth.env
+UNIT=mattermost-ssl-auth
 # Same binary the unit's ExecStart runs (the Ubuntu openresty package
 # ships only sbin/nginx; /usr/bin/openresty is a symlink to it).
 NGINX=/usr/local/openresty/nginx/sbin/nginx
@@ -22,7 +23,9 @@ case "$1" in
     install -d /var/run/openresty /var/log/openresty
     install -d /var/lib/openresty/client_body_temp /var/lib/openresty/fastcgi_temp \
       /var/lib/openresty/proxy_temp /var/lib/openresty/scgi_temp /var/lib/openresty/uwsgi_temp
-    WORKER_USER="$({ "$NGINX" -V 2>&1 || true; } | grep -oE -- '--user=[A-Za-z0-9_]{2,}' || true)"
+    # Hyphen is last in the class so it is literal: a hyphenated
+    # --user= name must not truncate the chown.
+    WORKER_USER="$({ "$NGINX" -V 2>&1 || true; } | grep -oE -- '--user=[A-Za-z0-9_-]{2,}' || true)"
     WORKER_USER="${WORKER_USER#--user=}"
     if [ -z "$WORKER_USER" ]; then
       if id openresty >/dev/null 2>&1; then
@@ -79,7 +82,15 @@ case "$1" in
       exit 0
     fi
 
-    systemctl restart mattermost-ssl-auth
+    # Enable for boot before (re)starting: `|| true` tolerates chroot
+    # and other envs where enable can't reach a live systemd; on a
+    # real system it is idempotent.
+    echo "Enabling $UNIT for boot..."
+    systemctl enable "$UNIT" || true
+
+    # restart = restart-if-active / start-if-inactive, so upgrades
+    # pick up the fresh config and a filled-in env starts the service.
+    systemctl restart "$UNIT"
     ;;
   abort-upgrade|abort-remove|abort-deconfigure)
     ;;
