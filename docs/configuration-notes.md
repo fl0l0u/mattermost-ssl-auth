@@ -285,3 +285,34 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   restarts, only when the config test + placeholder gate pass.
 - The VM demo/test server includes (18444/18445/18443) follow the
   same glob, now under `/etc/mattermost-ssl-auth/includes/`.
+
+## 2026-08-27 — test seam 18443 de-packaged (0.1.3)
+
+- User decision: the loopback test seam `server-test-18443.conf`
+  (the `X-Test-DN` DN-spoofing hook) is NOT installed by the .deb.
+  It moved from `src/etc/mattermost-ssl-auth/includes/` to
+  `example/server-test-18443.conf` — an opt-in template carrying a
+  header (copy to `/etc/mattermost-ssl-auth/includes/`, picked up by
+  the `server-*.conf` glob, `systemctl reload mattermost-ssl-auth`;
+  never expose beyond loopback).
+- Conffiles 5 → 4: `/etc/mattermost-ssl-auth.env`,
+  `/etc/mattermost-ssl-auth/nginx.conf`,
+  `/etc/mattermost-ssl-auth/includes/proxy-common-headers.conf`,
+  `/etc/mattermost-ssl-auth/includes/server-443.conf`.
+- `example/demo_install.sh` (development deployment) still deploys
+  the seam for the demo, now from `example/`.
+- Upgrade 0.1.2 → 0.1.3 on this VM — dpkg 1.22.6 does NOT delete a
+  conffile that a new version drops: a stock `dpkg -i` marked it
+  `obsolete` in the status DB and kept it on disk and in `dpkg -L`
+  (it would only be removed on `dpkg --purge`, which would have
+  deleted the operator's seam along with the env). To reach the
+  intended "unowned operator file" state: env backed up
+  (`dpkg --purge` removes ALL conffiles, even modified, without
+  prompting), `dpkg --purge`, fresh `dpkg -i` of 0.1.3 (postinst
+  placeholder gate: service left NOT started by design), real env
+  restored, `systemctl enable --now`, seam copied back from backup
+  as an **unowned operator file** (survives upgrades via the glob;
+  no longer in the package's file list), `systemctl reload` — 18443
+  answering again, `dpkg -V` clean (only the operator env differs,
+  as before), `dpkg -L` no longer lists it, Conffiles exactly 4.
+  Full 16-probe matrix green.

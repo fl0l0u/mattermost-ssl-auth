@@ -40,10 +40,11 @@ install -m 644 \
   src/etc/mattermost-ssl-auth/nginx.conf \
   "$pkg_dir/etc/mattermost-ssl-auth/nginx.conf"
 
+# The loopback test seam is NOT packaged: it is an opt-in template in
+# example/server-test-18443.conf (X-Test-DN allows DN spoofing).
 install -m 644 \
   src/etc/mattermost-ssl-auth/includes/proxy-common-headers.conf \
   src/etc/mattermost-ssl-auth/includes/server-443.conf \
-  src/etc/mattermost-ssl-auth/includes/server-test-18443.conf \
   "$pkg_dir/etc/mattermost-ssl-auth/includes/"
 
 install -m 644 \
@@ -75,16 +76,16 @@ install -m 644 src/lib/systemd/system/mattermost-ssl-auth.service \
 install -m 600 src/etc/mattermost-ssl-auth.env.example \
   "$pkg_dir/etc/mattermost-ssl-auth.env"
 
-# Conffiles: the env + the whole conf tree. dpkg preserves locally
-# modified copies across upgrades (prompting, saving its own as
-# .dpkg-dist) and keeps them on `dpkg -r` — only `dpkg --purge`
-# removes them.
+# Conffiles (4): the env + the whole packaged conf tree. dpkg
+# preserves locally modified copies across upgrades (prompting, saving
+# its own as .dpkg-dist) and keeps them on `dpkg -r` — only
+# `dpkg --purge` removes them. (The test seam is not a conffile — it is
+# not packaged at all.)
 printf '%s\n' \
   /etc/mattermost-ssl-auth.env \
   /etc/mattermost-ssl-auth/nginx.conf \
   /etc/mattermost-ssl-auth/includes/proxy-common-headers.conf \
   /etc/mattermost-ssl-auth/includes/server-443.conf \
-  /etc/mattermost-ssl-auth/includes/server-test-18443.conf \
   > "$pkg_dir/DEBIAN/conffiles"
 
 # --- documentation ---------------------------------------------------------

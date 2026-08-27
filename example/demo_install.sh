@@ -242,7 +242,6 @@ for src in \
   etc/mattermost-ssl-auth/nginx.conf \
   etc/mattermost-ssl-auth/includes/proxy-common-headers.conf \
   etc/mattermost-ssl-auth/includes/server-443.conf \
-  etc/mattermost-ssl-auth/includes/server-test-18443.conf \
   usr/local/openresty/nginx/lua/mattermost_ssl_auth.lua \
   usr/local/openresty/nginx/lua/mattermost_origin.lua \
   usr/local/openresty/nginx/lua/mattermost_location_default.lua \
@@ -256,6 +255,13 @@ do
   install -m 644 -o root -g root "$REPO_ROOT/src/${src}" "$dest"
   echo "  deployed ${dest}"
 done
+# Optional loopback test seam (development only, NOT in the .deb): the
+# demo is a development deployment, so deploy the template from
+# example/ for it. X-Test-DN allows DN spoofing — loopback only.
+dest=/etc/mattermost-ssl-auth/includes/server-test-18443.conf
+[ -f "$dest" ] && mv -f "$dest" "${dest}.bak-$(date +%Y%m%d%H%M%S)"
+install -m 644 -o root -g root "$SCRIPT_DIR/server-test-18443.conf" "$dest"
+echo "  deployed ${dest}"
 
 echo "9. /etc/mattermost-ssl-auth.env"
 install -m 600 -o root -g root "$REPO_ROOT/src/etc/mattermost-ssl-auth.env.example" /etc/mattermost-ssl-auth.env
