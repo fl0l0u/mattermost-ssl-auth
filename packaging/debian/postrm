@@ -1,0 +1,13 @@
+#!/bin/sh
+# mattermost-ssl-auth postrm (built by packaging/build_deb.sh).
+set -e
+
+case "$1" in
+  remove|upgrade)
+    systemctl daemon-reload
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+  *)
+    ;;
+esac

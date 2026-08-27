@@ -1,2 +1,5 @@
 # Playwright MCP browser session artifacts
 .playwright-mcp/
+
+# Built .deb artifacts (packaging/build_deb.sh)
+dist/

@@ -1,0 +1,18 @@
+Package: mattermost-ssl-auth
+Version: __VERSION__
+Section: web
+Priority: optional
+Architecture: all
+Maintainer: __MAINTAINER__
+Depends: openresty, redis-server
+Recommends: mattermost
+Description: client-certificate auth reverse proxy for Mattermost
+ Client-certificate (x509) single sign-on for Mattermost behind an
+ OpenResty reverse proxy: the gateway maps the browser's client
+ certificate to a Mattermost user, logs the user in server-side via
+ the admin API, and proxies the session, so no Mattermost session
+ cookie ever reaches the browser.
+ .
+ OpenResty + Lua gateway; users are provisioned through the
+ Mattermost admin API and per-user session state (cookies + token)
+ is stored in Redis.

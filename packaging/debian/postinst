@@ -1,0 +1,58 @@
+#!/bin/sh
+# mattermost-ssl-auth postinst (built by packaging/build_deb.sh).
+set -e
+
+CONF=/usr/local/openresty/nginx/conf/nginx.conf
+ENV=/etc/mattermost-ssl-auth.env
+# Same binary the unit's ExecStart runs (the Ubuntu openresty package
+# ships only sbin/nginx; /usr/bin/openresty is a symlink to it).
+NGINX=/usr/local/openresty/nginx/sbin/nginx
+
+case "$1" in
+  configure)
+    systemctl daemon-reload
+
+    missing=""
+
+    # The conf hardcodes the certificate paths, so a passing config
+    # test proves the TLS material is in place.
+    if ! "$NGINX" -t -c "$CONF" >/dev/null 2>&1; then
+      missing="$missing
+ - the nginx config test failed (most often missing certificates).
+   Provide them at the paths the conf expects —
+   example/build_certs.sh builds all three:
+     /etc/ssl/private/mattermost.crt
+     /etc/ssl/private/mattermost.key
+     /etc/ssl/private/client-ca.crt"
+    fi
+
+    if [ ! -f "$ENV" ]; then
+      missing="$missing
+ - $ENV is missing (restore the .dpkg-dist copy dpkg saved, or copy
+   src/etc/mattermost-ssl-auth.env.example from the repo)."
+    else
+      if grep -qF '<system-admin personal access token>' "$ENV"; then
+        missing="$missing
+ - $ENV still has the placeholder value for
+   MATTERMOST_PROVISION_TOKEN."
+      fi
+      if grep -qF '<default team id>' "$ENV"; then
+        missing="$missing
+ - $ENV still has the placeholder value for MM_DEFAULT_TEAM_ID."
+      fi
+    fi
+
+    if [ -n "$missing" ]; then
+      echo "mattermost-ssl-auth: configuration incomplete, service NOT started:$missing" >&2
+      echo "mattermost-ssl-auth: fill in $ENV and the certificate paths, then:" >&2
+      echo "  $NGINX -t -c $CONF && systemctl restart mattermost-ssl-auth" >&2
+      exit 0
+    fi
+
+    systemctl restart mattermost-ssl-auth
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+  *)
+    ;;
+esac

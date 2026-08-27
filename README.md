@@ -62,6 +62,26 @@ The script installs everything (OpenResty, Mattermost 11.x, PostgreSQL, Redis), 
 
 Manual installation and PKI details: [`example/README.md`](example/README.md).
 
+## Packaging (.deb)
+
+The gateway ships as a deb (`Architecture: all` — the payload is configuration + Lua, no compiled code):
+
+```bash
+bash packaging/build_deb.sh    # → dist/mattermost-ssl-auth_<version>_all.deb
+sudo dpkg -i dist/mattermost-ssl-auth_<version>_all.deb
+# or: sudo apt ./dist/mattermost-ssl-auth_<version>_all.deb
+```
+
+Fresh-machine prerequisites: the package `Depends:` on `openresty` and `redis-server` (apt pulls them in) and `Recommends:` `mattermost`. On top of that:
+
+* **Mattermost** 11.x reachable at `MATTERMOST_UPSTREAM` (default `http://127.0.0.1:8065`), with a system-admin personal access token and a default team.
+* **Certificates** at `/etc/ssl/private/mattermost.crt`, `/etc/ssl/private/mattermost.key` and `/etc/ssl/private/client-ca.crt` — [`example/build_certs.sh`](example/build_certs.sh) builds all of them. These can be in place **before or after** the install: `postinst` runs the nginx config test and checks the env file, and starts the service only when both pass; otherwise it prints exactly what is missing and leaves the service stopped (fix, then `systemctl restart mattermost-ssl-auth`).
+* **Env file**: fill in `/etc/mattermost-ssl-auth.env` (the package ships the example values as a conffile; at minimum replace the placeholders for `MATTERMOST_PROVISION_TOKEN` and `MM_DEFAULT_TEAM_ID`), then `sudo systemctl restart mattermost-ssl-auth`.
+
+**Upgrade behavior:** `/etc/mattermost-ssl-auth.env` is a dpkg conffile, so an upgrade prompts to keep your local copy; if you choose the packaged version, dpkg saves your copy as `mattermost-ssl-auth.env.dpkg-dist`. Server blocks the .deb does not own survive upgrades untouched: a site-specific server is a `server-*.conf` dropped into `/usr/local/openresty/nginx/conf/includes/` — the main conf's `server-*.conf` glob picks it up on reload (see the conf's comment).
+
+**Migrating from the manual [`example/demo_install.sh`](example/demo_install.sh) deployment:** back up `/etc/mattermost-ssl-auth.env` first — it is not dpkg-owned, so during the install dpkg may treat it as a locally-modified conffile and save it aside as `.dpkg-dist`; compare it with your backup and restore the real values afterwards.
+
 ## Configuration
 
 All settings live in `/etc/mattermost-ssl-auth.env` (template: [`src/etc/mattermost-ssl-auth.env.example`](src/etc/mattermost-ssl-auth.env.example); root-only, mode 600 — it holds a system-admin token). The file is consumed by the systemd unit's `EnvironmentFile`; changing it requires a **full service restart** (nginx `env` directives are main-context only).

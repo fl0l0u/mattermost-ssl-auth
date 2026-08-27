@@ -1,0 +1,17 @@
+#!/bin/sh
+# mattermost-ssl-auth prerm (built by packaging/build_deb.sh).
+set -e
+
+case "$1" in
+  remove)
+    systemctl stop mattermost-ssl-auth || true
+    ;;
+  # upgrade / deconfigure: the service keeps running; the unit file is
+  # replaced in place and re-registered by postrm.
+  upgrade|deconfigure)
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+  *)
+    ;;
+esac
