@@ -23,10 +23,14 @@ end
 -- Source of truth: MATTERMOST_SITE_URL (declared via `env` in nginx.conf).
 local function origin_host(url)
     -- host = the authority of an https?:// URL; after the host only a bare
-    -- :port (or nothing) may follow — a path, userinfo or stray space
-    -- rejects the shape. Note: this OpenResty's LuaJIT 2.1.ROLLING pattern
-    -- engine never matches an optional capture group ((...)?), so the tail
-    -- is captured unconditionally and validated separately.
+    -- :port (or nothing) may follow — a trailing path or stray space
+    -- rejects the shape. (Userinfo is NOT shape-rejected: the `user@`
+    -- prefix stays inside the host capture, since `[^:/?#]+` matches
+    -- `@` — such an Origin simply fails the same-host comparison
+    -- downstream: "user@host" ~= "host".) Note: this OpenResty's
+    -- LuaJIT 2.1.ROLLING pattern engine never matches an optional
+    -- capture group ((...)?), so the tail is captured unconditionally
+    -- and validated separately.
     local host, rest = url:match("^https?://([^:/?#]+)(.*)$")
     if not host then
         return nil

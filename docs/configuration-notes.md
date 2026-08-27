@@ -205,13 +205,17 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   env-var pattern.
 - Gate (throwaway conf, live conf untouched) FAILED on
   OpenResty 1.31.1.1 (nginx 1.31.1):
-  `nginx: [emerg] unknown "testcert" variable` — `env NAME;`
-  preserves the process environment (for Lua `os.getenv`) but does
-  not make `NAME` usable as an nginx variable in config directives at
-  parse time in this build (the same error for `return 200 "$TESTCERT";`,
-  with the variable confirmed present in the master's environment; a
-  hardcoded-path control conf passed). NOT shipped: cert paths stay
-  hardcoded in the repo conf and on this VM.
+  `nginx: [emerg] unknown "testcert" variable` — in any stock nginx
+  a main-context `env` directive only preserves the variable in the
+  process environment (for Lua `os.getenv`); it never creates an nginx
+  config variable (the separate `ngx_http_env_module` http-context
+  `env` is what maps env vars to named nginx variables, and it is
+  irrelevant here — `ssl_certificate` is evaluated at config time,
+  not request time). Evidence: the same error for
+  `return 200 "$TESTCERT";`, with the variable confirmed present in
+  the master's environment; a hardcoded-path control conf passed.
+  NOT shipped: cert paths stay hardcoded in the repo conf and on this
+  VM.
 - Alternatives if this is wanted later: keep hardcoded + document;
   substitute the paths into the conf at install time; or dynamic ssl
   (`ssl_certificate_by_lua_block`) — heavier, and re-reads the cert
