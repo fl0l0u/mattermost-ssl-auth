@@ -7,6 +7,7 @@ https://github.com/fl0l0u
 -- test ingress (127.0.0.1:18443) seam: pinned empty on the production server
 local test_dn = ngx.var.mmssl_test_dn; if test_dn == "" then test_dn = nil end
 local ssl = require("mattermost_ssl_auth"):new(test_dn or ngx.var.ssl_client_s_dn)
+local origin = require("mattermost_origin")
 -- 1.2. The TLS layer must have validated the client certificate
 if test_dn == nil and ngx.var.ssl_client_verify ~= "SUCCESS" then
     return ssl:fail(ngx.HTTP_FORBIDDEN, "no valid client certificate")
@@ -21,35 +22,11 @@ end
 -- drive-by: attacker page + the victim's auto-presented cert/cookie) is
 -- passed through untouched, so Mattermost still rejects it with 403.
 -- Source of truth: MATTERMOST_SITE_URL (declared via `env` in nginx.conf).
-local function origin_host(url)
-    -- host = the authority of an https?:// URL; after the host only a bare
-    -- :port (or nothing) may follow — a trailing path or stray space
-    -- rejects the shape. (Userinfo is NOT shape-rejected: the `user@`
-    -- prefix stays inside the host capture, since `[^:/?#]+` matches
-    -- `@` — such an Origin simply fails the same-host comparison
-    -- downstream: "user@host" ~= "host".) Note: this OpenResty's
-    -- LuaJIT 2.1.ROLLING pattern engine never matches an optional
-    -- capture group ((...)?), so the tail is captured unconditionally
-    -- and validated separately.
-    local host, rest = url:match("^https?://([^:/?#]+)(.*)$")
-    if not host then
-        return nil
-    end
-    if rest ~= "" and rest:match("^:%d+$") == nil then
-        return nil
-    end
-    return host
-end
-local function same_host(a, b)
-    local ha = origin_host(a)
-    local hb = origin_host(b)
-    return ha ~= nil and hb ~= nil and ha:lower() == hb:lower()
-end
 local site_url = os.getenv("MATTERMOST_SITE_URL")
 if ngx.var.uri == "/api/v4/websocket"
     and site_url
     and ngx.var.http_origin
-    and same_host(site_url, ngx.var.http_origin) then
+    and origin.same_host(site_url, ngx.var.http_origin) then
     ngx.req.clear_header("Origin")
     ngx.req.set_header("Origin", site_url)
 end

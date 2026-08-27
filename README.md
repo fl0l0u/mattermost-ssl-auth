@@ -127,6 +127,14 @@ This exercises provisioning, login, session replay, and self-healing without a c
 
 Browser scenarios P0–P6 were additionally verified with Playwright against the reference VM: P0 no-DN → 400; P1 fresh-browser cold start boots logged in (0×401 out of 47 requests, jar hydrated); P3 server-side session revoke → 401s only inside the 60 s throttle window, then transparent in-access renewal (token rotated, no `/login` navigation, no reload); P4 forced-stale age → renewal; P5 OU=Admins → system_admin; P6 warm session in a fresh browser → straight to the app, zero logins. A two-user test (flo→aze and aze→flo) delivered messages both directions with 0×401/0×5xx (live unread badges are not observable in headless; browser WebSockets work on the test ingress via same-host Origin normalization, see the Origin caveat above; live delivery was proven at protocol level on the production path).
 
+The pure-Lua same-host `Origin` helpers ([`mattermost_origin.lua`](src/usr/local/openresty/nginx/lua/mattermost_origin.lua) — the logic behind the WebSocket `Origin` normalization caveat above) have a dependency-free unit test that runs on stock LuaJIT (no OpenResty):
+
+```bash
+luajit test/origin_test.lua   # from the repo root
+```
+
+On an installed gateway: copy `test/origin_test.lua` next to the module, then `cd /usr/local/openresty/nginx/lua && /usr/local/openresty/luajit/bin/luajit origin_test.lua`.
+
 ## License
 
 Distributed under the Apache-2.0 License. See `LICENSE` for more information.

@@ -237,6 +237,7 @@ for src in \
   usr/local/openresty/nginx/conf/includes/server-443.conf \
   usr/local/openresty/nginx/conf/includes/server-test-18443.conf \
   usr/local/openresty/nginx/lua/mattermost_ssl_auth.lua \
+  usr/local/openresty/nginx/lua/mattermost_origin.lua \
   usr/local/openresty/nginx/lua/mattermost_location_default.lua \
   usr/local/openresty/nginx/lua/mattermost_location_login.lua \
   usr/local/openresty/nginx/lua/mattermost_cookie_hydration.lua \
