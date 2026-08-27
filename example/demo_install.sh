@@ -233,9 +233,6 @@ echo "8. Deploy gateway files (existing files backed up)"
 systemctl disable --now openresty 2>/dev/null || true
 for src in \
   usr/local/openresty/nginx/conf/nginx.conf \
-  usr/local/openresty/nginx/conf/includes/location-ws.conf \
-  usr/local/openresty/nginx/conf/includes/location-login.conf \
-  usr/local/openresty/nginx/conf/includes/location-root.conf \
   usr/local/openresty/nginx/conf/includes/proxy-common-headers.conf \
   usr/local/openresty/nginx/conf/includes/server-443.conf \
   usr/local/openresty/nginx/conf/includes/server-test-18443.conf \

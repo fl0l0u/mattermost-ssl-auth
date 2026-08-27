@@ -216,3 +216,25 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   substitute the paths into the conf at install time; or dynamic ssl
   (`ssl_certificate_by_lua_block`) — heavier, and re-reads the cert
   material per handshake.
+
+## 2026-08-27 — locations re-merged inline into the server files (self-contained servers)
+
+- At operator request, the location bodies were re-merged inline into
+  `includes/server-443.conf` and `includes/server-test-18443.conf` —
+  each server file is now self-contained — and
+  `location-ws.conf` / `location-login.conf` / `location-root.conf`
+  were deleted (`example/demo_install.sh` deploy list updated to match).
+- Accepted tradeoff: the location bodies are now duplicated per
+  server (the VM-only demo servers 18444/18445 carry their own inline
+  copies too), in exchange for each server file being readable as a
+  whole.
+- `proxy-common-headers.conf` is unchanged and remains the only shared
+  snippet (spliced into the WS and root locations of every server).
+  Note the common headers cannot live at the server level either:
+  nginx `proxy_set_header` inheritance is all-or-nothing, the same
+  rule that rules out the http level — a location defining any
+  `proxy_set_header` inherits none of the outer ones.
+- Behavior-preserving move: verified on this VM (all four servers) —
+  `openresty -T` re-expands byte-identically (7 WS / 6 root
+  proxy_set_header everywhere) and the full E2E battery is green.
+  Backups: `/root/nginx-conf.pre-remerge.bak.tgz` (whole conf dir).
