@@ -171,3 +171,48 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   NOT remove stale files on re-deploy: e.g. the now-unreferenced
   `/usr/local/openresty/nginx/lua/mattermost_session_filter.lua` left on
   this VM stays on disk (harmless — nothing includes it).
+
+## 2026-08-27 — shared include for the common proxy headers (DRY)
+
+- The 4 proxy headers duplicated in `location-ws.conf` and
+  `location-root.conf` (`X-Real-IP $remote_addr`,
+  `X-Forwarded-For $proxy_add_x_forwarded_for`,
+  `X-Forwarded-Proto https`, `X-Forwarded-Ssl on`) moved to
+  `includes/proxy-common-headers.conf`, spliced in via `include` —
+  they cannot live in the http block because nginx
+  `proxy_set_header` inheritance is all-or-nothing: a location that
+  defines any `proxy_set_header` inherits none of the outer ones, so
+  hoisting them would have silently dropped all four from every
+  location. (`location-login.conf` has no proxying — Lua-terminated —
+  and is untouched; `example/demo_install.sh` deploy list gained the
+  new include.)
+- Deployed on this VM (all four servers pick it up via the shared
+  location includes): `openresty -t` OK, service restarted, full
+  16-point E2E battery green — WS 101 on all four ingresses,
+  cross-origin WS still 403, identities flo/aze on 18444/18445/18443,
+  no-cert 400, HSTS 443-only, server cert + CertificateRequest intact
+  on 443, and `openresty -T` shows the spliced 7 (WS) / 6 (root)
+  proxy headers. Backups: `/root/nginx-conf.pre-headersenv.bak.tgz`
+  (whole conf dir), `/root/mattermost-ssl-auth.env.pre-headersenv.bak`.
+
+## 2026-08-27 — cert-path env externalization: gated, NOT shipped
+
+- Attempt: take the hardcoded cert paths out of `server-443.conf`
+  (and the VM-only demo servers') `ssl_certificate` /
+  `ssl_certificate_key` / `ssl_client_certificate` into `$MATTEMOST_SSL_CERT`
+  / `$MATTEMOST_SSL_KEY` / `$MATTEMOST_SSL_CLIENT_CA` via main-context
+  `env` + `/etc/mattermost-ssl-auth.env`, following the existing 12
+  env-var pattern.
+- Gate (throwaway conf, live conf untouched) FAILED on
+  OpenResty 1.31.1.1 (nginx 1.31.1):
+  `nginx: [emerg] unknown "testcert" variable` — `env NAME;`
+  preserves the process environment (for Lua `os.getenv`) but does
+  not make `NAME` usable as an nginx variable in config directives at
+  parse time in this build (the same error for `return 200 "$TESTCERT";`,
+  with the variable confirmed present in the master's environment; a
+  hardcoded-path control conf passed). NOT shipped: cert paths stay
+  hardcoded in the repo conf and on this VM.
+- Alternatives if this is wanted later: keep hardcoded + document;
+  substitute the paths into the conf at install time; or dynamic ssl
+  (`ssl_certificate_by_lua_block`) — heavier, and re-reads the cert
+  material per handshake.
