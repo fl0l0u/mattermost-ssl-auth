@@ -242,3 +242,25 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   `openresty -T` re-expands byte-identically (7 WS / 6 root
   proxy_set_header everywhere) and the full E2E battery is green.
   Backups: `/root/nginx-conf.pre-remerge.bak.tgz` (whole conf dir).
+
+## 2026-08-27 — server includes globbed (makes .deb upgrades safe for site-specific servers)
+
+- The two explicit include lines in `nginx.conf` (`server-443.conf`,
+  `server-test-18443.conf`) became one glob:
+  `include /usr/local/openresty/nginx/conf/includes/server-*.conf;`
+  (expands in alphabetical order). Rationale for the .deb packaging:
+  the package will own only `server-443.conf` and
+  `server-test-18443.conf`; a site-specific server is a
+  `server-*.conf` file dropped into `includes/` outside dpkg's file
+  list, so it — and any local edits to it — survive .deb upgrades
+  without the main conf ever needing a per-site edit that an upgrade
+  would prompt on or replace.
+- On this VM the two VM-only demo include lines disappeared from
+  `nginx.conf` (the glob picks up `server-demo-18444.conf` /
+  `server-demo-18445.conf` already on disk) — the VM's conf is now
+  byte-identical to the repo's. Verified on this VM: `openresty -t`
+  OK, graceful reload (systemd `ExecReload` = HUP), all four
+  listeners still answer — /users/me: flo on 443 (client cert) and
+  18444 (pinned), aze on 18443 (X-Test-DN) and 18445 (pinned); WS
+  101 on the 443 production path. Backup:
+  `/root/nginx.conf.pre-glob.bak`.
