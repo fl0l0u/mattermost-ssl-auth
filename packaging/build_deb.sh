@@ -26,23 +26,25 @@ fi
 rm -rf "$pkg_dir"
 mkdir -p \
   "$pkg_dir/DEBIAN" \
-  "$pkg_dir/usr/local/openresty/nginx/conf/includes" \
+  "$pkg_dir/etc/mattermost-ssl-auth/includes" \
   "$pkg_dir/usr/local/openresty/nginx/lua" \
   "$pkg_dir/usr/local/openresty/nginx/lua/resty" \
   "$pkg_dir/usr/local/openresty/nginx/test" \
-  "$pkg_dir/etc/systemd/system" \
+  "$pkg_dir/lib/systemd/system" \
   "$pkg_dir/usr/share/doc/$package"
 
 # --- payload -------------------------------------------------------------
+# Conf tree: the package owns /etc/mattermost-ssl-auth/ outright, so a
+# stock dpkg -i never collides with the openresty package's conf.
 install -m 644 \
-  src/usr/local/openresty/nginx/conf/nginx.conf \
-  "$pkg_dir/usr/local/openresty/nginx/conf/nginx.conf"
+  src/etc/mattermost-ssl-auth/nginx.conf \
+  "$pkg_dir/etc/mattermost-ssl-auth/nginx.conf"
 
 install -m 644 \
-  src/usr/local/openresty/nginx/conf/includes/proxy-common-headers.conf \
-  src/usr/local/openresty/nginx/conf/includes/server-443.conf \
-  src/usr/local/openresty/nginx/conf/includes/server-test-18443.conf \
-  "$pkg_dir/usr/local/openresty/nginx/conf/includes/"
+  src/etc/mattermost-ssl-auth/includes/proxy-common-headers.conf \
+  src/etc/mattermost-ssl-auth/includes/server-443.conf \
+  src/etc/mattermost-ssl-auth/includes/server-test-18443.conf \
+  "$pkg_dir/etc/mattermost-ssl-auth/includes/"
 
 install -m 644 \
   src/usr/local/openresty/nginx/lua/mattermost_ssl_auth.lua \
@@ -64,14 +66,26 @@ install -m 644 \
 
 install -m 644 test/origin_test.lua "$pkg_dir/usr/local/openresty/nginx/test/"
 
-install -m 644 src/etc/systemd/system/mattermost-ssl-auth.service \
-  "$pkg_dir/etc/systemd/system/"
+install -m 644 src/lib/systemd/system/mattermost-ssl-auth.service \
+  "$pkg_dir/lib/systemd/system/"
 
 # Ships the example values as a dpkg conffile (600, like
 # example/demo_install.sh installs it); postinst refuses to start the
 # service while the placeholders are in place.
 install -m 600 src/etc/mattermost-ssl-auth.env.example \
   "$pkg_dir/etc/mattermost-ssl-auth.env"
+
+# Conffiles: the env + the whole conf tree. dpkg preserves locally
+# modified copies across upgrades (prompting, saving its own as
+# .dpkg-dist) and keeps them on `dpkg -r` — only `dpkg --purge`
+# removes them.
+printf '%s\n' \
+  /etc/mattermost-ssl-auth.env \
+  /etc/mattermost-ssl-auth/nginx.conf \
+  /etc/mattermost-ssl-auth/includes/proxy-common-headers.conf \
+  /etc/mattermost-ssl-auth/includes/server-443.conf \
+  /etc/mattermost-ssl-auth/includes/server-test-18443.conf \
+  > "$pkg_dir/DEBIAN/conffiles"
 
 # --- documentation ---------------------------------------------------------
 install -m 644 LICENSE "$pkg_dir/usr/share/doc/$package/copyright"

@@ -1,18 +1,21 @@
 #!/bin/bash
 # Demo installer for mattermost-ssl-auth on a FRESH Ubuntu 24.04 (noble) box.
 #
-#   1. apt packages: openresty (official repo), mattermost (newest 11.x,
+#   1. pre-requisites: root, Ubuntu 24.04
+#   2. apt packages: openresty (official repo), mattermost (newest 11.x,
 #      official repo), postgresql, redis-server
-#   2. Postgres: role mmuser (LOGIN, random password) + database mattermost
-#   3. Mattermost config: loopback listen, SiteURL, local mode, SQL DSN
-#   4. First user via API (local mode makes it the system admin),
+#   3. Postgres: role mmuser (LOGIN, random password) + database mattermost
+#   4. Mattermost config: loopback listen, SiteURL, local mode, SQL DSN
+#   5. First user via API (local mode makes it the system admin),
 #      provisioning PAT, default team
-#   5. PKI from build_certs.sh -> /etc/ssl/private/{mattermost.crt,mattermost.key,client-ca.crt}
-#   6. vendored lua-resty-http v0.17.1 (repo-pinned) -> /usr/local/openresty/nginx/lua/resty/
-#   7. repo src/ -> /usr/local + /etc/systemd/system (existing files backed up)
-#   8. /etc/mattermost-ssl-auth.env (root:600)
-#   9. proxy state dirs (logs/pid/temp) + worker ownership
-#  10. systemctl + openresty -t
+#   6. PKI from build_certs.sh -> /etc/ssl/private/{mattermost.crt,mattermost.key,client-ca.crt}
+#   7. vendored lua-resty-http v0.17.1 (repo-pinned) -> /usr/local/openresty/nginx/lua/resty/
+#   8. repo src/ -> /etc/mattermost-ssl-auth (conf tree) +
+#      /lib/systemd/system (unit) + /usr/local/openresty/nginx/lua (existing
+#      files backed up)
+#   9. /etc/mattermost-ssl-auth.env (root:600)
+#  10. proxy state dirs (logs/pid/temp) + worker ownership
+#  11. systemctl + openresty -t
 #
 # Run as root:  sudo bash example/demo_install.sh
 # Safe to re-run: every step is idempotent (secrets are persisted in
@@ -236,16 +239,16 @@ echo "8. Deploy gateway files (existing files backed up)"
 # The stock openresty service is superseded by mattermost-ssl-auth.service.
 systemctl disable --now openresty 2>/dev/null || true
 for src in \
-  usr/local/openresty/nginx/conf/nginx.conf \
-  usr/local/openresty/nginx/conf/includes/proxy-common-headers.conf \
-  usr/local/openresty/nginx/conf/includes/server-443.conf \
-  usr/local/openresty/nginx/conf/includes/server-test-18443.conf \
+  etc/mattermost-ssl-auth/nginx.conf \
+  etc/mattermost-ssl-auth/includes/proxy-common-headers.conf \
+  etc/mattermost-ssl-auth/includes/server-443.conf \
+  etc/mattermost-ssl-auth/includes/server-test-18443.conf \
   usr/local/openresty/nginx/lua/mattermost_ssl_auth.lua \
   usr/local/openresty/nginx/lua/mattermost_origin.lua \
   usr/local/openresty/nginx/lua/mattermost_location_default.lua \
   usr/local/openresty/nginx/lua/mattermost_location_login.lua \
   usr/local/openresty/nginx/lua/mattermost_cookie_hydration.lua \
-  etc/systemd/system/mattermost-ssl-auth.service
+  lib/systemd/system/mattermost-ssl-auth.service
 do
   dest="/${src}"
   [ -f "$dest" ] && mv -f "$dest" "${dest}.bak-$(date +%Y%m%d%H%M%S)"
@@ -263,7 +266,7 @@ sed -i "s|^MATTERMOST_SITE_URL=.*|MATTERMOST_SITE_URL=${MM_SITE_URL}|" /etc/matt
 sed -i "s|^MATTERMOST_PROVISION_TOKEN=.*|MATTERMOST_PROVISION_TOKEN=${MM_PAT}|" /etc/mattermost-ssl-auth.env
 sed -i "s|^MM_DEFAULT_TEAM_ID=.*|MM_DEFAULT_TEAM_ID=${MM_TEAM_ID}|" /etc/mattermost-ssl-auth.env
 
-echo "9.5. Proxy state directories (must exist before first start)"
+echo "10. Proxy state directories (must exist before first start)"
 # ProtectSystem=strict mounts the nginx prefix read-only, so on a fresh
 # install nginx cannot create its state paths itself. The unit's
 # RuntimeDirectory=/LogsDirectory=/StateDirectory= entries create these on
@@ -280,7 +283,7 @@ WORKER_USER="${WORKER_USER:-nobody}"
 echo "  worker user: ${WORKER_USER}"
 chown -R "$WORKER_USER" /var/lib/openresty
 
-echo "10. Start gateway"
+echo "11. Start gateway"
 systemctl daemon-reload
 systemctl enable --now mattermost-ssl-auth
 openresty -t

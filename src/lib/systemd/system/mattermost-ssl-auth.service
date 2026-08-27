@@ -1,4 +1,4 @@
-# /etc/systemd/system/mattermost-ssl-auth.service
+# /lib/systemd/system/mattermost-ssl-auth.service
 [Unit]
 Description=Mattermost SSL Auth OpenResty
 After=network-online.target redis-server.target
@@ -7,9 +7,9 @@ PartOf=mattermost.service
 
 [Service]
 Type=forking
-ExecStart=/usr/local/openresty/nginx/sbin/nginx -c /usr/local/openresty/nginx/conf/nginx.conf
-ExecReload=/usr/local/openresty/nginx/sbin/nginx -c /usr/local/openresty/nginx/conf/nginx.conf -s reload
-ExecStop=/usr/local/openresty/nginx/sbin/nginx -c /usr/local/openresty/nginx/conf/nginx.conf -s quit
+ExecStart=/usr/local/openresty/nginx/sbin/nginx -c /etc/mattermost-ssl-auth/nginx.conf
+ExecReload=/usr/local/openresty/nginx/sbin/nginx -c /etc/mattermost-ssl-auth/nginx.conf -s reload
+ExecStop=/usr/local/openresty/nginx/sbin/nginx -c /etc/mattermost-ssl-auth/nginx.conf -s quit
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict

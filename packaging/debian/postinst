@@ -2,7 +2,7 @@
 # mattermost-ssl-auth postinst (built by packaging/build_deb.sh).
 set -e
 
-CONF=/usr/local/openresty/nginx/conf/nginx.conf
+CONF=/etc/mattermost-ssl-auth/nginx.conf
 ENV=/etc/mattermost-ssl-auth.env
 # Same binary the unit's ExecStart runs (the Ubuntu openresty package
 # ships only sbin/nginx; /usr/bin/openresty is a symlink to it).
@@ -12,33 +12,63 @@ case "$1" in
   configure)
     systemctl daemon-reload
 
+    # The unit's RuntimeDirectory=/LogsDirectory=/StateDirectory= entries
+    # only exist while the service runs (systemd removes them on stop),
+    # so on a fresh install — and after any stop — the paths the conf
+    # writes to are gone. nginx -t opens the error log and checks the
+    # temp paths, so create them up front (idempotent) and hand the tree
+    # to the worker user: the workers, not the root master, write the
+    # temp files (same detection as example/demo_install.sh).
+    install -d /var/run/openresty /var/log/openresty
+    install -d /var/lib/openresty/client_body_temp /var/lib/openresty/fastcgi_temp \
+      /var/lib/openresty/proxy_temp /var/lib/openresty/scgi_temp /var/lib/openresty/uwsgi_temp
+    WORKER_USER="$({ "$NGINX" -V 2>&1 || true; } | grep -oE -- '--user=[A-Za-z0-9_]{2,}' || true)"
+    WORKER_USER="${WORKER_USER#--user=}"
+    if [ -z "$WORKER_USER" ]; then
+      if id openresty >/dev/null 2>&1; then
+        WORKER_USER=openresty
+      elif id www-data >/dev/null 2>&1; then
+        WORKER_USER=www-data
+      else
+        WORKER_USER=nobody
+      fi
+    fi
+    chown "$WORKER_USER" /var/run/openresty /var/log/openresty
+    chown -R "$WORKER_USER" /var/lib/openresty
+
     missing=""
 
     # The conf hardcodes the certificate paths, so a passing config
     # test proves the TLS material is in place.
-    if ! "$NGINX" -t -c "$CONF" >/dev/null 2>&1; then
+    if ! conf_test_err="$("$NGINX" -t -c "$CONF" 2>&1)"; then
+      echo "$conf_test_err" >&2
       missing="$missing
- - the nginx config test failed (most often missing certificates).
-   Provide them at the paths the conf expects —
-   example/build_certs.sh builds all three:
-     /etc/ssl/private/mattermost.crt
-     /etc/ssl/private/mattermost.key
-     /etc/ssl/private/client-ca.crt"
+  - the nginx config test failed (error above)."
+      case "$conf_test_err" in
+        */etc/ssl/private/*|*certificate*)
+          missing="$missing
+    Provide the certificates at the paths the conf expects —
+    example/build_certs.sh builds all three:
+      /etc/ssl/private/mattermost.crt
+      /etc/ssl/private/mattermost.key
+      /etc/ssl/private/client-ca.crt"
+          ;;
+      esac
     fi
 
     if [ ! -f "$ENV" ]; then
       missing="$missing
- - $ENV is missing (restore the .dpkg-dist copy dpkg saved, or copy
-   src/etc/mattermost-ssl-auth.env.example from the repo)."
+  - $ENV is missing (restore the .dpkg-dist copy dpkg saved, or copy
+    src/etc/mattermost-ssl-auth.env.example from the repo)."
     else
       if grep -qF '<system-admin personal access token>' "$ENV"; then
         missing="$missing
- - $ENV still has the placeholder value for
-   MATTERMOST_PROVISION_TOKEN."
+  - $ENV still has the placeholder value for
+    MATTERMOST_PROVISION_TOKEN."
       fi
       if grep -qF '<default team id>' "$ENV"; then
         missing="$missing
- - $ENV still has the placeholder value for MM_DEFAULT_TEAM_ID."
+  - $ENV still has the placeholder value for MM_DEFAULT_TEAM_ID."
       fi
     fi
 

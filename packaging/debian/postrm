@@ -3,7 +3,7 @@
 set -e
 
 case "$1" in
-  remove|upgrade)
+  remove|upgrade|purge)
     systemctl daemon-reload
     ;;
   abort-upgrade|abort-remove|abort-deconfigure)
