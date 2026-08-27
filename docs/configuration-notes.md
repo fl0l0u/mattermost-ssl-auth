@@ -316,3 +316,39 @@ Note: `example/demo_install.sh` also sets `EnableUserAccessTokens=true` —
   answering again, `dpkg -V` clean (only the operator env differs,
   as before), `dpkg -L` no longer lists it, Conffiles exactly 4.
   Full 16-probe matrix green.
+
+## 2026-08-27 — clean-VM (<vm-ip>) 0.1.3 fresh-install integration test: PASS
+
+- Fresh Ubuntu 24.04 VM, stock `dpkg -i` of
+  `mattermost-ssl-auth_0.1.3_all.deb` (user `<VM_USER>`, sudo): the
+  postinst placeholder gate behaved as designed — service left NOT
+  started, message listed the two missing env placeholders. After the
+  operator drop-ins (certs into `/etc/ssl/private`, env values) and
+  `systemctl enable --now`: full 16-probe matrix
+  (test/e2e-vm-matrix.md) **16/16**.
+- `dpkg -V openresty` clean on the fresh machine — the 0.1.0 conflict
+  (the deb overwrote files owned by the openresty package) stays fixed
+  on a fresh install, not only on the reference VM.
+- Known cosmetic, no change: on service start the journal shows
+  `nginx: [alert] could not open error log ... Read-only file system`
+  under ProtectSystem=strict — expected pre-config-parse behavior (the
+  error log path opens after the config is loaded; the unit's
+  RuntimeDirectory= creates it at start); the service is healthy.
+- Findings folded in this round (0.1.4): D1 — `example/demo_install.sh`
+  aborted on a truly fresh Mattermost 11.10.1 (the mattermost deb's
+  postinst only ENABLES, never starts, so `config.json` does not exist
+  until first start; the script now seeds it from
+  `config.defaults.json`); D2 — README DN table corrected to the DNs
+  `example/build_certs.sh` actually issues (`/O=Example Org/OU=Admins/
+  CN=flolou/emailAddress=flo@example.test`,
+  `/O=Example Org/OU=Users/CN=Azerty/emailAddress=aze@example.test`,
+  provisioned users `flo`/`aze`); D3 — README `REDIS_URI` shows the
+  TCP URI plus the stock-socket caveat (`700 redis:redis`,
+  unreachable by the `nobody` workers); D4 — README: a fresh
+  `apt install openresty` leaves the stock `openresty` unit
+  enabled+active on `:80`, which the package never touches
+  (`sudo systemctl disable --now openresty` if unused); D5 — matrix
+  probe 14 note (the s_client SSL-Session `Protocol:` line is racy
+  under `echo |` EOF for TLS 1.3 — the session ticket arrives
+  asynchronously; use the `New, <ver>, Cipher is ...` line as the
+  handshake-complete indicator).
