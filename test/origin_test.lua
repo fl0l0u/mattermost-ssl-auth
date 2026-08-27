@@ -23,6 +23,9 @@ local cases = {
     { 'origin_host("https://mattermost.example.test:18445")',
       origin.origin_host("https://mattermost.example.test:18445"),
       "mattermost.example.test" },
+    { 'origin_host("https://user@example.test")',
+      origin.origin_host("https://user@example.test"),
+      "user@example.test" },
     -- origin_host: safe rejections
     { 'reject uppercase scheme ("HTTPS://…")',
       origin.origin_host("HTTPS://mattermost.example.test"), nil },
@@ -40,6 +43,8 @@ local cases = {
       origin.origin_host("null"), nil },
     { 'reject port then path ("https://mattermost.example.test:443/")',
       origin.origin_host("https://mattermost.example.test:443/"), nil },
+    { 'reject stray space ("https://example.test /")',
+      origin.origin_host("https://example.test /"), nil },
     { 'reject absent host ("https://")',
       origin.origin_host("https://"), nil },
     -- same_host
