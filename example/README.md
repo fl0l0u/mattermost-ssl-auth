@@ -32,8 +32,8 @@ bash build_certs.sh
 
 Builds a minimal two-level PKI (root CA + signing CA):
 * server certificate `certs/mattermost.{crt,key}` for `mattermost.example.test` (SAN)
-* admin user `certs/flo.{crt,key,pfx}` — `flolou@simple.org`, `CN=Flo Lou`, `OU=Admins` (provisioned as `system_admin`)
-* regular user `certs/aze.{crt,key,pfx}` — `azerty@simple.org`, `CN=Azé Rtÿiôµ`, `OU=Users` (non-ASCII CN on purpose)
+* admin user `certs/flo.{crt,key,pfx}` — `O=Example Org`, `OU=Admins`, `CN=flolou`, `emailAddress=flo@example.test` (provisioned user `flo`, system admin via `OU=Admins`)
+* regular user `certs/aze.{crt,key,pfx}` — `O=Example Org`, `OU=Users`, `CN=Azerty`, `emailAddress=aze@example.test` (provisioned user `aze`)
 
 To deploy the server material manually:
 ```bash
